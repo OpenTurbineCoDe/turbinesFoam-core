@@ -1,0 +1,124 @@
+{
+  "version": "2.0.0",
+  "inputs": [
+    {
+      "id": "image",
+      "type": "promptString",
+      "description": "Docker image name",
+      "default": "turbines-core-proto"
+    },
+    {
+      "id": "tag",
+      "type": "promptString",
+      "description": "Docker tag",
+      "default": "step1"
+    },
+    {
+      "id": "hostPort",
+      "type": "promptString",
+      "description": "Host port to map to container 5555",
+      "default": "5555"
+    }
+  ],
+
+  "windows": {
+    "options": {
+      "shell": {
+        "executable": "C:\\Windows\\System32\\cmd.exe",
+        "args": ["/d", "/c"]
+      }
+    }
+  },
+
+  "tasks": [
+    {
+      "label": "Docker: Build image",
+      "type": "shell",
+      "command": "docker build -t ${input:image}:${input:tag} .",
+      "group": "build",
+      "problemMatcher": []
+    },
+    {
+      "label": "Docker: Rebuild (no cache)",
+      "type": "shell",
+      "command": "docker build --no-cache -t ${input:image}:${input:tag} .",
+      "problemMatcher": []
+    },
+    {
+      "label": "Docker: Run (foreground)",
+      "type": "shell",
+      "command": "docker run --rm -p ${input:hostPort}:5555 --name ${input:image}-run ${input:image}:${input:tag}",
+      "problemMatcher": []
+    },
+    {
+      "label": "Docker: Run (detached)",
+      "type": "shell",
+      "command": "docker run -d --rm -p ${input:hostPort}:5555 --name ${input:image}-run ${input:image}:${input:tag}",
+      "problemMatcher": []
+    },
+    {
+      "label": "Docker: Stop container",
+      "type": "shell",
+      "command": "docker stop ${input:image}-run 2>nul || exit /b 0",
+      "problemMatcher": []
+    },
+    {
+      "label": "Docker: Logs (follow)",
+      "type": "shell",
+      "command": "docker logs -f ${input:image}-run",
+      "problemMatcher": []
+    },
+    {
+      "label": "Docker: Exec shell",
+      "type": "shell",
+      "command": "docker exec -it ${input:image}-run cmd",
+      "problemMatcher": []
+    },
+    {
+      "label": "Docker: List images",
+      "type": "shell",
+      "command": "docker images",
+      "problemMatcher": []
+    },
+    {
+      "label": "Docker: List containers",
+      "type": "shell",
+      "command": "docker ps -a",
+      "problemMatcher": []
+    },
+
+    /* ---- Quick API tests (curl) ---- */
+    {
+      "label": "Test: /initialize",
+      "type": "shell",
+      "command": "curl -s -X POST http://localhost:${input:hostPort}/initialize -H \"Content-Type: application/json\" -d \"{}\"",
+      "problemMatcher": []
+    },
+    {
+      "label": "Test: /step",
+      "type": "shell",
+      "command": "curl -s -X POST http://localhost:${input:hostPort}/step -H \"Content-Type: application/json\" -d \"{\\\"t\\\":0.13799,\\\"dt\\\":0.068995,\\\"inputs\\\":{\\\"omega\\\":0.8}}\"",
+      "problemMatcher": []
+    },
+    {
+      "label": "Test: /terminate",
+      "type": "shell",
+      "command": "curl -s -X POST http://localhost:${input:hostPort}/terminate -H \"Content-Type: application/json\" -d \"{}\"",
+      "problemMatcher": []
+    },
+
+    /* ---- Cleanup helpers ---- */
+    {
+      "label": "Docker: Remove dangling images",
+      "type": "shell",
+      "command": "docker image prune -f",
+      "problemMatcher": []
+    },
+    {
+      "label": "Docker: Remove stopped container",
+      "type": "shell",
+      "command": "docker rm ${input:image}-run 2>nul || exit /b 0",
+      "problemMatcher": []
+    }
+  ]
+}
