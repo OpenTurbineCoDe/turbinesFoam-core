@@ -1,64 +1,92 @@
-# Use the official OpenFOAM v2406 image (ESI-OpenCFD).
-# If your environment uses a different tag, adjust it here.
-FROM openfoam/openfoam:v2406
+# Base: ESI-OpenCFD OpenFOAM v2406
+FROM opencfd/openfoam-default:2406
 
-# Install OS deps for building and Python server
+# System packages
 USER root
 RUN apt-get update && DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
     build-essential ccache cmake git python3 python3-pip python3-venv \
  && rm -rf /var/lib/apt/lists/*
 
-# Create a non-root workspace user (many OpenFOAM images already have an 'openfoam' user;
-# if so, you can drop this and just use that user.)
+# --- Idempotent user/group setup ---------------------------------------------
 ARG USERNAME=openfoam
 ARG USER_UID=1000
 ARG USER_GID=1000
-RUN if ! id -u $USERNAME >/dev/null 2>&1; then \
-      groupadd --gid $USER_GID $USERNAME && \
-      useradd --uid $USER_UID --gid $USER_GID -m -s /bin/bash $USERNAME; \
-    fi
 
-# Workdir layout inside container
-ENV CORE_HOME=/opt/turbinesFoam-core
-ENV SRC_DIR=$CORE_HOME/src
-ENV PS_DIR=$CORE_HOME/protocol-server
+RUN set -eux; \
+    if getent group "${USER_GID}" >/dev/null; then \
+        TARGET_GRP="$(getent group "${USER_GID}" | cut -d: -f1)"; \
+    else \
+        groupadd -g "${USER_GID}" "${USERNAME}"; \
+        TARGET_GRP="${USERNAME}"; \
+    fi; \
+    if id -u "${USERNAME}" >/dev/null 2>&1; then \
+        usermod -g "${TARGET_GRP}" "${USERNAME}" || true; \
+    else \
+        if getent passwd "${USER_UID}" >/dev/null; then \
+            useradd -m -g "${TARGET_GRP}" -s /bin/bash "${USERNAME}"; \
+        else \
+            useradd -m -u "${USER_UID}" -g "${TARGET_GRP}" -s /bin/bash "${USERNAME}"; \
+        fi; \
+    fi; \
+    test -d "/home/${USERNAME}" || mkdir -p "/home/${USERNAME}"; \
+    chown -R "${USERNAME}:$(id -g ${USERNAME})" "/home/${USERNAME}"
+# -----------------------------------------------------------------------------
+
+# Layout
+ENV CORE_HOME=/opt/turbinesFoam-core \
+    SRC_DIR=/opt/turbinesFoam-core/src \
+    PS_DIR=/opt/turbinesFoam-core/protocol-server
 WORKDIR $CORE_HOME
 
-# Copy repo content
-# (Make sure your .dockerignore excludes build artifacts)
-COPY --chown=$USERNAME:$USERNAME src/ $SRC_DIR/
-COPY --chown=$USERNAME:$USERNAME protocol-server/ $PS_DIR/
-COPY --chown=$USERNAME:$USERNAME scripts/ scripts/
+# Ensure dirs exist; hand to $USERNAME
+RUN mkdir -p "$SRC_DIR" "$PS_DIR" "$CORE_HOME/scripts" && chown -R $USERNAME:$(id -g $USERNAME) "$CORE_HOME"
 
-# Set up Python venv for protocol server
+# Copy only Python reqs first for cache
+COPY protocol-server/requirements.txt $PS_DIR/requirements.txt
+RUN chown -R $USERNAME:$(id -g $USERNAME) "$PS_DIR"
+
+# Create venv & install deps as non-root
 USER $USERNAME
 RUN python3 -m venv $CORE_HOME/.venv && \
     . $CORE_HOME/.venv/bin/activate && \
     pip install --upgrade pip && \
     pip install -r $PS_DIR/requirements.txt
 
-# Compile custom solvers with OpenFOAM environment
-# We need 'bash -lc' so that 'source /opt/openfoam*/etc/bashrc' applies to the shell
+# Copy the rest (as root), then fix ownership
+USER root
+COPY src/ $SRC_DIR/
+COPY protocol-server/ $PS_DIR/
+COPY scripts/ $CORE_HOME/scripts/
+RUN chown -R $USERNAME:$(id -g $USERNAME) "$CORE_HOME" && \
+    chmod +x $PS_DIR/start.sh || true && \
+    chmod +x $CORE_HOME/scripts/compile_solvers.sh || true
+
+# OpenFOAM env path for this image
+ENV FOAM_BASHRC=/usr/lib/openfoam/openfoam2406/etc/bashrc
+
+# Use Bash for sourcing
 SHELL ["/bin/bash", "-lc"]
 
-# Point WM_PROJECT_USER_DIR to a per-user space so wmake can deposit build products
+# Verify FOAM_BASHRC present
+RUN test -f "$FOAM_BASHRC" || (echo "ERROR: FOAM_BASHRC not found at $FOAM_BASHRC" && exit 1)
+
+# Per-user build dir
 ENV WM_PROJECT_USER_DIR=/home/$USERNAME/OpenFOAM/$USERNAME-v2406
 
-RUN mkdir -p "$WM_PROJECT_USER_DIR" && \
-    source /opt/openfoam*/etc/bashrc && \
-    export PATH=$WM_PROJECT_DIR/wmake:$PATH && \
-    cd "$SRC_DIR/PimpleFoamMy" && wmake && \
-    cd "$SRC_DIR/turbinesFoamMy" && wmake
+# Build custom code via your script
+USER $USERNAME
+RUN set +eux; \
+    source "$FOAM_BASHRC"; \
+    set -e; \
+    mkdir -p "$WM_PROJECT_USER_DIR"; \
+    SRC_DIR="$SRC_DIR" FOAM_BASHRC="$FOAM_BASHRC" "$CORE_HOME/scripts/compile_solvers.sh"
 
-# Add solvers to PATH (OpenFOAM typically finds them via $FOAM_USER_APPBIN)
-RUN echo 'source /opt/openfoam*/etc/bashrc' >> ~/$USERNAME.bashrc
+# Make env available in interactive shells
+RUN echo 'source "$FOAM_BASHRC"' >> ~/.bashrc
 
 # Expose protocol server port
 EXPOSE 5555
 
-# Startup: launch protocol server
-# Ensures OpenFOAM env is available for any runtime needs
+# Runtime: source OpenFOAM + venv, then start server
 ENV VENV=$CORE_HOME/.venv
-CMD source /opt/openfoam*/etc/bashrc && \
-    source $VENV/bin/activate && \
-    bash $PS_DIR/start.sh
+ENTRYPOINT [ "bash", "-lc", "source \"$FOAM_BASHRC\" && source \"$VENV/bin/activate\" && exec \"$PS_DIR/start.sh\"" ]
