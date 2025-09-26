@@ -10,7 +10,7 @@ Containerized core for OpenFOAM v2406 with custom solvers and a Linux-side proto
 - `scripts/compile_solvers.sh` – (re)build both solvers inside container
 
 ## Quick start
-
+From bash
 ```bash
 # 1) Build the image
 ./docker/build.sh
@@ -20,3 +20,4 @@ Containerized core for OpenFOAM v2406 with custom solvers and a Linux-side proto
 
 # 3) Health check (from host)
 curl http://localhost:5555/health
+```
