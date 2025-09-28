@@ -1,0 +1,25 @@
+# OpenFOAM build artifacts
+src/**/Make/linux*
+src/**/Make/*.o
+src/**/Make/*.dep
+src/**/Make/sourceFiles
+src/**/Make/variables
+
+# Python virtual environments
+.venv/
+env/
+venv/
+
+# Python cache
+__pycache__/
+*.pyc
+*.pyo
+
+# Editor / IDE
+.vscode/
+.idea/
+*.swp
+
+# OS junk
+.DS_Store
+Thumbs.db
