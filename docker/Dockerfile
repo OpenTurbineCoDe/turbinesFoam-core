@@ -88,5 +88,7 @@ RUN echo 'source "$FOAM_BASHRC"' >> ~/.bashrc
 EXPOSE 5555
 
 # Runtime: source OpenFOAM + venv, then start server
+# Runtime: activate venv, then start server (bashrc handled inside start.sh)
 ENV VENV=$CORE_HOME/.venv
-ENTRYPOINT [ "bash", "-lc", "source \"$FOAM_BASHRC\" && source \"$VENV/bin/activate\" && exec \"$PS_DIR/start.sh\"" ]
+ENTRYPOINT [ "bash", "-lc", "source \"$VENV/bin/activate\" && exec \"$PS_DIR/start.sh\"" ]
+

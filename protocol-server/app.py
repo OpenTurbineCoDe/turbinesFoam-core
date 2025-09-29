@@ -1,5 +1,6 @@
+# protocol-server/app.py
 from fastapi import FastAPI
-from pydantic import BaseModel
+from pydantic import BaseModel, RootModel
 from typing import List, Dict, Any
 import uuid
 
@@ -13,12 +14,13 @@ class Meta(BaseModel):
     num_nodes_per_blade: int
 
 
-class R6(BaseModel):  # 6
-    __root__: List[float]
+# --- Root types (Pydantic v2) ---
+class R6(RootModel[List[float]]):
+    pass
 
-
-class R9(BaseModel):  # 9
-    __root__: List[float]
+class R9(RootModel[List[float]]):
+    pass
+# --------------------------------
 
 
 class Hub(BaseModel):
@@ -74,7 +76,11 @@ class StepIn(BaseModel):
 @app.post("/initialize")
 def initialize(payload: InitializeIn):
     sid = str(uuid.uuid4())
-    SESS[sid] = {"meta": payload.meta.dict(), "constants": payload.constants, "state": payload.initial_state.dict()}
+    SESS[sid] = {
+        "meta": payload.meta.model_dump(),
+        "constants": payload.constants,
+        "state": payload.initial_state.model_dump(),
+    }
     return {"status": "ok", "session_id": sid, "channels": {"names": [], "units": []}}
 
 
@@ -95,10 +101,10 @@ def step(payload: StepIn):
     # update session state if you keep a history
     sess["state"] = {
         "t0": payload.t,
-        "hub": payload.inputs.hub.dict(),
-        "nacelle": payload.inputs.nacelle.dict(),
-        "root": payload.inputs.root.dict(),
-        "mesh": payload.inputs.mesh.dict(),
+        "hub": payload.inputs.hub.model_dump(),
+        "nacelle": payload.inputs.nacelle.model_dump(),
+        "root": payload.inputs.root.model_dump(),
+        "mesh": payload.inputs.mesh.model_dump(),
     }
     return {"status": "ok", "outputs": {"meshFrcMom": meshFrcMom}}
 
@@ -107,4 +113,14 @@ def step(payload: StepIn):
 def terminate(payload: Dict[str, str]):
     sid = payload.get("session_id")
     SESS.pop(sid, None)
+    return {"status": "ok"}
+
+
+@app.get("/")
+def root():
+    return {"status": "ok"}
+
+
+@app.get("/health")
+def health():
     return {"status": "ok"}
