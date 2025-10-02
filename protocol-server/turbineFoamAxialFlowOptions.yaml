@@ -1,0 +1,191 @@
+block_mesh:
+  x_cells: 96
+  x_downstream: -690.928
+  x_upstream: 1209.124
+  y_cells: 32
+  y_left: -259.098
+  y_right: 259.098
+  z_cells: 24
+  z_down: -259.098
+  z_up: 259.098
+fv_options:
+  axis:
+  - -1
+  - 0
+  - 0
+  blade_profile:
+  - Cylinder
+  - Cylinder
+  - FFA_W3_600
+  - FFA_W3_600
+  - FFA_W3_600
+  - FFA_W3_480
+  - FFA_W3_480
+  - FFA_W3_360
+  - FFA_W3_360
+  - FFA_W3_301
+  - FFA_W3_301
+  - FFA_W3_301
+  - FFA_W3_241
+  - FFA_W3_241
+  - FFA_W3_241
+  - FFA_W3_241
+  - FFA_W3_241
+  - FFA_W3_241
+  - FFA_W3_241
+  - FFA_W3_241
+  - FFA_W3_241
+  - FFA_W3_241
+  - FFA_W3_241
+  - FFA_W3_241
+  - FFA_W3_241
+  - FFA_W3_241
+  - FFA_W3_241
+  - FFA_W3_241
+  - FFA_W3_241
+  - FFA_W3_241
+  - FFA_W3_241
+  - FFA_W3_241
+  - FFA_W3_241
+  - FFA_W3_241
+  - FFA_W3_241
+  - FFA_W3_241
+  - FFA_W3_241
+  - FFA_W3_241
+  - FFA_W3_241
+  - FFA_W3_241
+  free_stream_velocity:
+  - 11.4
+  - 0
+  - 0
+  hub_element_data:
+  - (0 0 4.45 4.45)
+  - (0 -4.45 4.45)
+  hub_profile: Cylinder
+  include_in_total_drag: true
+  include_tower_drag: false
+  num_blade_elements: 78
+  num_blades: 3
+  num_hub_elements: 1
+  num_tower_elements: 6
+  origin:
+  - 0
+  - 0
+  - 0
+  profile_data:
+  - FFA_W3_360
+  - FFA_W3_600
+  - Cylinder
+  - FFA_W3_480
+  - FFA_W3_241
+  - FFA_W3_301
+  rotor_radius: 86.366
+  tip_speed_ratio: 7
+  tower_element_data:
+  - (0 -115.6 4.15 )
+  - (0 -96.33333333333333 4.15 )
+  - (0 -77.06666666666666 4.15 )
+  - (0 -57.8 4.15 )
+  - (0 -38.53333333333333 4.15 )
+  - (0 -19.266666666666666 4.15 )
+  - (0 -0.0 4.15 )
+  tower_profile: Cylinder
+  vertical_direction:
+  - 0
+  - 0
+  - 1
+hex_mesh_dict:
+  addLayers: false
+  casellated_mesh: true
+  error_reduction: 0.75
+  expansion_ratio: 1.0
+  explicit_feature_snap: true
+  feature_angle: 60
+  final_layer_thickness: 0.3
+  implicit_feature_snap: true
+  maxNoneOrtho: 70
+  max_boundary_skewness: 20
+  max_concave: 80
+  max_face_thickness_ratio: 0.5
+  max_global_cells: 10000000
+  max_internal_skewness: 5
+  max_load_unbalance: 0.1
+  max_local_cells: 500000
+  max_non_orthogonal: 75
+  max_thickness_to_medial_ratio: 0.3
+  maximum:
+  - 120
+  - 120
+  - 115.6
+  minDeterminant: 0.001
+  minVol: 1.0e-13
+  min_area: -1
+  min_face_weight: 0.05
+  min_median_axis_angle: 90
+  min_refinement_cells: 0
+  min_tet_quality: 1.0e-30
+  min_thickness: 0.25
+  min_triangle_twist: -1
+  min_twist: 0.05
+  min_volume_ratio: 0.01
+  minimum:
+  - -120
+  - -120
+  - -115.6
+  multi_region_feature_snap: false
+  nFeatureSnapIter: 10
+  nRelaxIter: 10
+  nSmoothPatch: 5
+  nSolveIter: 40
+  n_buffer_cells_no_extrude: 0
+  n_cells_between_levels: 1
+  n_grow: 0
+  n_layer_iteration: 50
+  n_relaxation_iterations: 5
+  n_relaxed_iteration: 20
+  n_smooth_scale: 4
+  n_smooth_surface_normals: 1
+  n_smooth_thickness: 10
+  relativeSize: true
+  snap: true
+  tolerance: 2.0
+  tower_point1:
+  - 0
+  - 0
+  - -115.6
+  tower_point2:
+  - 0
+  - 0
+  - 0
+  tower_type: searchableCylinder
+  turb_zone: searachableBox
+  turbine_point1:
+  - -1
+  - 0
+  - 0
+  turbine_point2:
+  - 1
+  - 0
+  - 0
+  turbine_radius: 86.366
+  turbine_type: searchableCylinder
+topo_dict:
+  rotor_end:
+  - 1
+  - 0
+  - 0
+  rotor_influence: 1
+  rotor_radius: 86.366
+  rotor_start:
+  - -1
+  - 0
+  - 0
+  tower_base:
+  - 0
+  - 0
+  - -115.6
+  tower_radius: 4.15
+  tower_top:
+  - 0
+  - 0
+  - 0

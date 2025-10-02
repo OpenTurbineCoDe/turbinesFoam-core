@@ -76,6 +76,8 @@ Note
 #include <fstream>
 #include <string>
 #include <cstdlib>
+#include <fcntl.h>
+#include <unistd.h>
 
 #include "fvCFD.H"
 #include "dynamicFvMesh.H"
@@ -119,6 +121,34 @@ static bool readStepMessage(const std::string& fifoPath, Foam::scalar& dt, bool&
         // invalid line; ignore and continue
         return false;
     }
+}
+
+// Cache a single write FD to FOAM_PERF_FIFO
+static int openPerfFd()
+{
+    static int fd = -1;
+    static bool tried = false;
+    if (!tried) {
+        tried = true;
+        if (const char* p = std::getenv("FOAM_PERF_FIFO")) {
+            // Blocks until protocol-server opens read end -> good startup sync
+            fd = ::open(p, O_WRONLY);
+        }
+    }
+    return fd;
+}
+
+static void writePerfJson(double timeValue, double dtValue, long stepIndex)
+{
+    int fd = openPerfFd();
+    if (fd < 0) return;
+
+    std::string s = "{\"time\":" + std::to_string(timeValue)
+                  + ",\"dt\":"    + std::to_string(dtValue)
+                  + ",\"step\":"  + std::to_string(stepIndex)
+                  + "}";
+    ::write(fd, s.c_str(), s.size());
+    ::write(fd, "\n", 1);
 }
 
 // * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * //
@@ -233,7 +263,10 @@ int main(int argc, char *argv[])
         }
 
         runTime.write();
-
+        if (Pstream::master())
+        {
+            writePerfJson(runTime.value(), runTime.deltaTValue(), runTime.timeIndex());
+        }
         runTime.printExecutionTime(Info);
     }
 
