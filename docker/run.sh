@@ -1,7 +1,6 @@
-#!/usr/bin/env bash
 set -euo pipefail
 
-IMAGE="turbinesfoam-core:v2406"   # or whatever tag you used in build.sh
+IMAGE="turbinesfoam-core:v2406"   # IMAGE TAG
 CONTAINER_NAME="turbinesfoam-core"
 
 # Host <-> container paths/ports

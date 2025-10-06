@@ -1,0 +1,19 @@
+# Generic modeling options file
+General:
+    verbosity: True  # When set to True, the code prints to screen many infos
+    
+    DLC: [1.1,]
+
+    
+Parametric study:
+    General:
+            flag: False
+            
+    Variable:
+        Name: r
+        Values: [85.0, 86.0, 87.0] 
+
+Optimiation:
+    General:
+        flag: False
+    

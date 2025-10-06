@@ -1,0 +1,83 @@
+blade:
+  blade_profiles:
+  - 0
+  - 0
+  - 1
+  - 1
+  - 1
+  - 2
+  - 2
+  - 3
+  - 3
+  - 4
+  - 4
+  - 4
+  - 5
+  - 5
+  - 5
+  - 5
+  - 5
+  - 5
+  - 5
+  - 5
+  - 5
+  - 5
+  - 5
+  - 5
+  - 5
+  - 5
+  - 5
+  - 5
+  - 5
+  - 5
+  - 5
+  - 5
+  - 5
+  - 5
+  - 5
+  - 5
+  - 5
+  - 5
+  - 5
+  - 5
+  pitch_angle: 0
+  profiles:
+  - Cylinder
+  - FFA_W3_600
+  - FFA_W3_480
+  - FFA_W3_360
+  - FFA_W3_301
+  - FFA_W3_241
+  radius: 86.366
+  tip_speed_ratio: 9
+environment:
+  atmospheric_pressure: 101325
+  gravity: 9.81
+  speed_of_sound: 337.29
+  temperature: 288.15
+  vapor_pressure: 1700
+fluid:
+  density: 1.225
+  dynamic_viscosity: 1.789e-05
+  kinematic_viscosity: 1.784e-05
+  power_law_exponent: 0.1429
+  prandtl_number: 0.71
+  reference_height: 120.0
+  specific_heat: 1006
+  sutherland_constant: 110.4
+  sutherland_temperature: 110.4
+  thermal_conductivity: 0.0257
+  thermal_expansion_coefficient: 0.00343
+  turbulence_intensity: 0.1
+  turbulence_length_scale: 0.1
+  velocity: 11.0
+hub:
+  overhang: -7.1
+  radius: 2.8
+rotor:
+  blade_precone_angle: 2.5
+  n_blades: 3
+  tilt_angle: 5
+tower:
+  height: 115.6
+  radius: 4.15

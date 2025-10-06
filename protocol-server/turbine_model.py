@@ -7,14 +7,14 @@ and can be used as input for the OpenTurbineCode solvers.
 """
 
 import yaml
-from openturbinecode.configs.pathing import PROJECT_ROOT
+from pathlib import Path
 
 
 class TurbineModel:
     def __init__(self, name="DTU10_MW"):
 
         self.name = name
-        self.file_location = PROJECT_ROOT / "models" / "defaults" / f"{self.name}.yaml"
+        self.file_location = Path(__file__).parent.resolve() / "models" / f"{self.name}.yaml"
 
         # Turbine dimensions
         self.fluid = Fluid()
@@ -43,12 +43,14 @@ class TurbineModel:
         Returns:
             dict: A dictionary containing the turbine model parameters.
         """
-        dict = {"fluid": self.fluid.__dict__,
-                "environment": self.environment.__dict__,
-                "blade": self.blade.__dict__,
-                "rotor": self.rotor.__dict__,
-                "tower": self.tower.__dict__,
-                "hub": self.hub.__dict__}
+        dict = {
+            "fluid": self.fluid.__dict__,
+            "environment": self.environment.__dict__,
+            "blade": self.blade.__dict__,
+            "rotor": self.rotor.__dict__,
+            "tower": self.tower.__dict__,
+            "hub": self.hub.__dict__,
+        }
         return dict
 
     def read_from_yaml(self, filename=None):
@@ -163,20 +165,49 @@ class Blade:
         self.radius = 86.366  # (m)
         self.tip_speed_ratio = 7  # (-)
         self.rotor_speed = 0  # (rpm) Only used if prescribed directly, otherwise calculated from TSR
-        self.profiles = ["Cylinder",
-                         "FFA_W3_600",
-                         "FFA_W3_480",
-                         "FFA_W3_360",
-                         "FFA_W3_301",
-                         "FFA_W3_241"]
-        self.blade_profiles = [0, 0,
-                               1, 1, 1,
-                               2, 2,
-                               3, 3,
-                               4, 4, 4,
-                               5, 5, 5, 5, 5, 5, 5, 5, 5, 5,
-                               5, 5, 5, 5, 5, 5, 5, 5, 5, 5,
-                               5, 5, 5, 5, 5, 5, 5, 5]
+        self.profiles = ["Cylinder", "FFA_W3_600", "FFA_W3_480", "FFA_W3_360", "FFA_W3_301", "FFA_W3_241"]
+        self.blade_profiles = [
+            0,
+            0,
+            1,
+            1,
+            1,
+            2,
+            2,
+            3,
+            3,
+            4,
+            4,
+            4,
+            5,
+            5,
+            5,
+            5,
+            5,
+            5,
+            5,
+            5,
+            5,
+            5,
+            5,
+            5,
+            5,
+            5,
+            5,
+            5,
+            5,
+            5,
+            5,
+            5,
+            5,
+            5,
+            5,
+            5,
+            5,
+            5,
+            5,
+            5,
+        ]
         self.pitch_angle = 0  # (degrees)
         self.origins = [[0, 0, 0], [0, 0, 0], [0, 0, 0]]
         self.orientations = [[0, -4, 0], [120, -4, 0], [240, -4, 0]]
@@ -257,13 +288,4 @@ class Hub:
 
 
 if __name__ == "__main__":
-    default_path = PROJECT_ROOT / "models" / "defaults"
-
-    # Create a new turbine model
-    model = TurbineModel()
-
-    # Write the default yaml
-    model.write_to_yaml(default_path / "DTU_10MW.yaml")
-
-    # Read the default yaml
-    model.read_from_yaml(default_path / "DTU_10MW.yaml")
+    pass

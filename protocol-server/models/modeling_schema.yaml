@@ -1,0 +1,180 @@
+# Author: OTCD dev team
+# Organization: 
+# Date: 2021-07-05
+
+# Dev Recommendation:
+#  all minimum options for OTCD should be made optional so that the validation assigns the default 
+#  value specified here in yaml that do not have them.
+#  That is also why "default: {}" must be given in every object
+
+
+$schema: "http://json-schema.org/draft-07/schema#"
+$id: OTCD_modeling_v00-mod1
+title: Generic modeling options file
+description: Open Turbine Control co-Design modeling option schema
+type: object
+required:
+    - OpenTurbineCoDe
+properties:
+    OpenTurbineCoDe:
+        type: object
+        optional:
+            - General
+            - DLC
+            - Geometry
+            - Meshing
+            - Aerodynamics
+            - Structure
+            - Aerostructural
+            - CoDesign
+        properties:
+
+            General:
+                type: object
+                optional:
+                - fidelity
+                - path_to_case
+                default: {} # <-- MUST PROVIDE DEFAULT OBJECT
+                properties:
+                    fidelity:
+                        type: string
+                        default: low
+                        enum:
+                            - low
+                            - high
+                    path_to_case:
+                        type: string
+                        default: ./   
+                        
+            DLC:     
+                type: object
+                optional:
+                - run
+                default: {}
+                properties:
+                    run: 
+                        type: boolean
+                        default: False             
+                
+            Geometry:
+                type: object
+                optional:
+                - PGL
+                - BB3D
+                default: {}
+                properties:   
+                    PGL:     
+                        type: object
+                        optional:
+                        - writeFiles
+                        default: {}
+                        properties:
+                            writeFiles: 
+                                type: boolean
+                                default: False
+                    BB3D:     
+                        type: object
+                        optional:
+                        - writeFiles
+                        default: {}
+                        properties:
+                            writeFiles: 
+                                type: boolean
+                                default: False
+
+            Meshing:
+                type: object
+                optional:
+                - Aero
+                - Structure
+                default: {}
+                properties:   
+                    Aero:
+                        optional:
+                        - PGL
+                        - PyHyp
+                        default: {}
+                        properties:   
+                            PGL:     
+                                type: object
+                                optional:
+                                - run
+                                default: {}
+                                properties:
+                                    run: 
+                                        type: boolean
+                                        default: False
+                            PyHyp:     
+                                type: object
+                                optional:
+                                - run
+                                default: {}
+                                properties:
+                                    run: 
+                                        type: boolean
+                                        default: False
+    # Meshing:
+    #     Aero:
+    #         PGL:
+    #             run: True
+    #             planform_file: planform.dat
+    #             bypass_script: /path/to/script #if this is not empty, we use this script instead of the generic one
+    #             meshName: 2Dmesh
+
+    #         PyHyp:
+    #             run: true
+    #             bypass_script: /path/to/script #if this is not empty, we use this script instead of the generic one
+    #             meshName: 3Dmesh
+
+
+            Aerodynamics:
+                type: object
+                optional:
+                - flag
+                default: {}
+                properties:   
+                    flag:
+                        type: boolean
+                        default: False
+    # Aerodynamics:
+    #     flag: True
+    #     bypass_script: /path/to/script #if this is not empty, we use this script instead of the generic one
+
+
+            Structure:
+                type: object
+                optional:
+                - flag
+                default: {}
+                properties:   
+                    flag:
+                        type: boolean
+                        default: False
+    # Structure:
+    #     flag: False
+
+
+            Aerostructural:
+                type: object
+                optional:
+                - flag
+                default: {}
+                properties:   
+                    flag:
+                        type: boolean
+                        default: False
+    # Aerostructural: 
+    #     flag: False
+
+
+            CoDesign:
+                type: object
+                optional:
+                - flag
+                default: {}
+                properties:   
+                    flag:
+                        type: boolean
+                        default: False        
+    # CoDesign:
+    #     flag: False

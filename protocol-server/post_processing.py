@@ -3,8 +3,8 @@ import numpy as np
 import pandas as pd
 from pathlib import Path
 import matplotlib.pyplot as plt
-from openturbinecode.configs.pathing import WSL_ROOT, FOAM_RUN
-from openturbinecode.models.turbine_model import TurbineModel
+from pathing import FOAM_RUN
+from turbine_model import TurbineModel
 
 
 class ElementData:
@@ -21,7 +21,7 @@ class ElementData:
 
 class AxialFlowPostProcessing:
     def __init__(self, case_name, turbine_model: TurbineModel = None):
-        self.case_dir: Path = WSL_ROOT / FOAM_RUN / case_name
+        self.case_dir: Path = FOAM_RUN / case_name
 
         # Extract the simulation results
         self.turbine_df: pd.DataFrame = self.extract_turbine_data()

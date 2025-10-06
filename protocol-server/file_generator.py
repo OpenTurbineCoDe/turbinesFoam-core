@@ -1,7 +1,7 @@
 """This module contains functions to generate axialFlowTurbine files for turbinesFoam."""
 
 from pathlib import Path
-from pathing import WSL_ROOT, FOAM_RUN
+from pathing import FOAM_RUN
 from turbine_model import TurbineModel
 from options import BlockMesh, topoDict, fvOptions, HexMeshDict, elementData, controlDict
 
@@ -865,7 +865,8 @@ FoamFile
 
 
 if __name__ == "__main__":
-    case_dir = WSL_ROOT / FOAM_RUN / "test_case"
-    model = TurbineModel()
-    generator = FileGenerator(model)
-    generator.generate_files(case_dir)
+    pass
+    # case_dir = WSL_ROOT / FOAM_RUN / "test_case"
+    # model = TurbineModel()
+    # generator = FileGenerator(model)
+    # generator.generate_files(case_dir)

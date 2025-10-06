@@ -21,7 +21,7 @@ class turbinesFoamWrapper:
         self.case_name = run_options.case_name
         self.case_class = run_options.case_class
 
-        self.case_dir = Path(util.WSL_ROOT / util.FOAM_RUN / self.case_name)
+        self.case_dir = Path(util.FOAM_RUN / self.case_name)
 
         # Load the case options
         self.foam_options = self.load_case(self.turbine, self.case_class, run_options)
@@ -66,8 +66,7 @@ class turbinesFoamWrapper:
         util.copy_axial_turbine_case(self.case_name)
 
     def preprocess(self):
-        """Preprocess the case directory by generating the OpenFOAM files.
-        """
+        """Preprocess the case directory by generating the OpenFOAM files."""
         print("Preprocessing case files...")
         if GEN_FILES:
             generator = FileGenerator(self.turbine, self.run_options)
@@ -103,6 +102,7 @@ if __name__ == "__main__":
     turbine = TurbineModel(name=MODEL)
     turbine.read_from_yaml()
     for tsr in range(12, 13):
+
         class RunOptions:
             def __init__(self):
                 self.case_name = "test_case"

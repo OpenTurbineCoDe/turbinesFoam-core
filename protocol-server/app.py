@@ -6,16 +6,18 @@ import subprocess
 import uuid
 from pathlib import Path
 from fastapi import FastAPI
-from pydantic import BaseModel, RootModel
+from pydantic import BaseModel, Field, ConfigDict, RootModel
 from file_generator import FileGenerator
 from turbine_model import TurbineModel
 
 app = FastAPI()
 SESS: Dict[str, Dict[str, Any]] = {}
+FOAM_BASHRC = "/usr/lib/openfoam/openfoam2406/etc/bashrc"
 
 
 class Meta(BaseModel):
-    schema: str
+    model_config = ConfigDict(populate_by_name=True)
+    schema_name: str = Field(alias="schema")  # <<< renamed
     num_blades: int
     num_nodes_per_blade: int
 
@@ -83,39 +85,39 @@ class StepIn(BaseModel):
 
 
 FOAM_BASHRC = "/usr/lib/openfoam/openfoam2406/etc/bashrc"
-SESS_ROOT = Path(os.environ.get("FOAM_SESS_ROOT", "/opt/sessions"))
+SESS_ROOT = Path(os.environ.get("FOAM_SESS_ROOT", "/tmp/turbinesfoam/sessions"))
 SESS_ROOT.mkdir(parents=True, exist_ok=True)
 
 
 @app.post("/initialize")
-def initialize(payload: dict):
+def initialize(payload: InitializeIn):
     sid = str(uuid.uuid4())
-    case_dir = SESS_ROOT / sid
-    shutil.rmtree(case_dir, ignore_errors=True)
-    case_dir.mkdir(parents=True, exist_ok=True)
+    # case_dir = SESS_ROOT / sid
+    # shutil.rmtree(case_dir, ignore_errors=True)
+    # case_dir.mkdir(parents=True, exist_ok=True)
 
-    # 1) Generate case files (system/*, elementData, controlDict, etc.)
-    turbine = TurbineModel(name=payload["meta"]["schema"])  # or however you pick the model
-    turbine.read_from_yaml()  # if needed
-    run_options = ...  # build from payload/constants
-    FileGenerator(turbine, run_options).generate_files(case_dir)
+    # # 1) Generate case files (system/*, elementData, controlDict, etc.)
+    # turbine = TurbineModel(name="IEA_15MW")  # or however you pick the model
+    # turbine.read_from_yaml()  # if needed
+    # run_options = ...  # build from payload/constants
+    # FileGenerator(turbine, run_options).generate_files(case_dir)
 
-    # 2) Copy 0.org -> 0 (you need a 0.org in your template or generate one)
-    shutil.copytree(case_dir / "0.org", case_dir / "0", dirs_exist_ok=True)
+    # # 2) Copy 0.org -> 0 (you need a 0.org in your template or generate one)
+    # shutil.copytree(case_dir / "0.org", case_dir / "0", dirs_exist_ok=True)
 
-    # 3) Make FIFOs
-    mkfifos(case_dir)
+    # # 3) Make FIFOs
+    # mkfifos(case_dir)
 
-    # 4) Start Allrun (non-blocking)
-    proc = start_allrun(case_dir)
+    # # 4) Start Allrun (non-blocking)
+    # proc = start_allrun(case_dir)
 
-    # store session
-    SESS[sid] = {"proc": proc, "case_dir": str(case_dir)}
+    # # store session
+    # SESS[sid] = {"proc": proc, "case_dir": str(case_dir)}
     return {"status": "ok", "session_id": sid}
 
 
 @app.post("/step")
-def step(payload: dict):
+def step(payload: StepIn):
     sid = payload["session_id"]
     sess = SESS.get(sid)
     if not sess:
@@ -129,7 +131,7 @@ def step(payload: dict):
 
 
 @app.post("/terminate")
-def terminate(payload: dict):
+def terminate(payload: Dict[str, str]):
     sid = payload.get("session_id")
     sess = SESS.pop(sid, None)
     if not sess:
@@ -163,8 +165,6 @@ def health():
 
 
 # --- helpers (drop-in for app.py) ---
-
-FOAM_BASHRC = "/usr/lib/openfoam/openfoam2406/etc/bashrc"
 
 
 def mkfifos(case_dir: Path):

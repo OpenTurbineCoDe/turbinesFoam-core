@@ -1,6 +1,6 @@
 import shutil
 from pathlib import Path
-from pathing import WSL_ROOT, AXIAL_RUN, FOAM_RUN
+from pathing import FOAM_RUN, AXIAL_SRC
 
 TEST_CASE = FOAM_RUN / "test_case"
 
@@ -12,7 +12,7 @@ def make_directory_in_foam_run(directory_name):
     Parameters:
     directory_name (str): Name of the new directory to create inside the WSL path.
     """
-    path_to_case: Path = WSL_ROOT / FOAM_RUN / directory_name
+    path_to_case: Path = FOAM_RUN / directory_name
     # Check if directory is already created
     if not path_to_case.exists():
         print(f"Creating new directory: {path_to_case}")
@@ -36,16 +36,16 @@ def allrun_turbinesFoam_case(directory_name):
     print("Starting turbinesFoam simulation...")
 
     case_dir: Path = FOAM_RUN / directory_name
-
+    # TODO: Uncomment and use WSL commands to run Allrun script
     # Set Allrun permissions for case directory
-    permissions_command = f"chmod +x {ubuntu.path_to_ubuntu(case_dir / 'Allrun')}"
-    print(f"Ubuntu permissions command: {permissions_command}")
-    ubuntu.run_ubuntu_command(permissions_command)
+    # permissions_command = f"chmod +x {ubuntu.path_to_ubuntu(case_dir / 'Allrun')}"
+    # print(f"Ubuntu permissions command: {permissions_command}")
+    # ubuntu.run_ubuntu_command(permissions_command)
 
-    # Run the Allrun script in the case directory
-    command = f"cd {ubuntu.path_to_ubuntu(case_dir)} && ./Allrun"
-    print(f"Allrun execute command: {command}")
-    ubuntu.run_ubuntu_command(command)
+    # # Run the Allrun script in the case directory
+    # command = f"cd {ubuntu.path_to_ubuntu(case_dir)} && ./Allrun"
+    # print(f"Allrun execute command: {command}")
+    # ubuntu.run_ubuntu_command(command)
 
 
 def allclean_turbinesFoam_case(directory_name):
@@ -58,7 +58,8 @@ def allclean_turbinesFoam_case(directory_name):
     print("Cleaning case directory...")
 
     # Run the Allclean script in the case directory
-    ubuntu.run_ubuntu_command(f"cd {ubuntu.path_to_ubuntu(directory_name)} && ./Allclean")
+    # TODO: Uncomment and use WSL commands to run Allclean script
+    # ubuntu.run_ubuntu_command(f"cd {ubuntu.path_to_ubuntu(directory_name)} && ./Allclean")
 
 
 def clear_case_directory(directory_name):
@@ -70,7 +71,7 @@ def clear_case_directory(directory_name):
     """
     print("Clearing case directory...")
 
-    path_to_case: Path = WSL_ROOT / FOAM_RUN / directory_name
+    path_to_case: Path = FOAM_RUN / directory_name
 
     # Remove the case directory and all its contents
     shutil.rmtree(path_to_case)
@@ -85,10 +86,10 @@ def copy_axial_turbine_case(directory_name):
     """
     print("Copying axial turbine case files to new case directory...")
 
-    path_to_case: Path = WSL_ROOT / FOAM_RUN / directory_name
+    path_to_case: Path = FOAM_RUN / directory_name
 
     # We can copy these using windows commands in Powershell
-    shutil.copytree(WSL_ROOT / AXIAL_RUN, path_to_case, dirs_exist_ok=True)
+    shutil.copytree(AXIAL_SRC, path_to_case, dirs_exist_ok=True)
 
 
 def initialize_run(directory_name):
@@ -97,8 +98,8 @@ def initialize_run(directory_name):
     Args:
         directory_name (str): The directory name in $FOAM_RUN to preprocess.
     """
-    source = WSL_ROOT / FOAM_RUN / directory_name / "0.org"
-    destination = WSL_ROOT / FOAM_RUN / directory_name / "0"
+    source = FOAM_RUN / directory_name / "0.org"
+    destination = FOAM_RUN / directory_name / "0"
 
     # Copy the 0.org directory to 0 directory
     shutil.copytree(source, destination, dirs_exist_ok=True)
@@ -114,8 +115,8 @@ def create_paraview_file(directory_name):
     directory_name (str): Name of the directory where the Paraview file will be created.
     """
     path_to_case: Path = FOAM_RUN / directory_name
-
-    ubuntu.run_ubuntu_command(f"cd {ubuntu.path_to_ubuntu(path_to_case)} && touch case.foam")
+    # TODO: Uncomment and use WSL commands to create Paraview file
+    # ubuntu.run_ubuntu_command(f"cd {ubuntu.path_to_ubuntu(path_to_case)} && touch case.foam")
 
 
 if __name__ == "__main__":
