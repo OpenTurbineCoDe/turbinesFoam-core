@@ -2,8 +2,6 @@ import shutil
 from pathlib import Path
 from pathing import FOAM_RUN, AXIAL_SRC
 
-TEST_CASE = FOAM_RUN / "test_case"
-
 
 def make_directory_in_foam_run(directory_name):
     """

@@ -1,7 +1,6 @@
 """This module contains functions to generate axialFlowTurbine files for turbinesFoam."""
 
 from pathlib import Path
-from pathing import FOAM_RUN
 from turbine_model import TurbineModel
 from options import BlockMesh, topoDict, fvOptions, HexMeshDict, elementData, controlDict
 

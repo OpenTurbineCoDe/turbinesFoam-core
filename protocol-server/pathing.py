@@ -1,5 +1,5 @@
 from pathlib import Path
 
+FOAM_BASHRC = Path("/usr/lib/openfoam/openfoam2406/etc/bashrc")
+FOAM_RUN = Path("/home/openfoam/OpenFOAM/openfoam-v2406/run")
 AXIAL_SRC = Path("/opt/turbinesFoam-core/src/turbinesFoamMy/tutorials/axialFlowTurbineAL")
-FOAM_RUN = Path("/home/openfoam/OpenFOAM/user-v2406/run")
-RESOURCE_DIR = Path("/opt/turbinesFoam-core/src/turbinesFoamMy/tutorials/resources")

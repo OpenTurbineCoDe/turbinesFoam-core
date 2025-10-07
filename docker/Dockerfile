@@ -117,11 +117,9 @@ RUN printf '\n# --- User dir overrides (persist across shells) ---\n' >> /home/$
   && printf '\n# --- OpenFOAM env ---\nsource %s\n' "${FOAM_BASHRC}" >> /home/${USERNAME}/.bashrc \
   && printf '\n# --- User aliases ---\nif [ -f ~/.bash_aliases ]; then . ~/.bash_aliases; fi\n' >> /home/${USERNAME}/.bashrc
 
-# Seed the run directory with any case resources you want available
-RUN mkdir -p "${FOAM_RUN}" \
-  && if [ -d "${SRC_DIR}/turbinesFoamMy/tutorials/resources" ]; then \
-       cp -r ${SRC_DIR}/turbinesFoamMy/tutorials/resources/* "${FOAM_RUN}/" || true; \
-     fi
+# Copy foilData to FOAM_RUN/resources/foilData
+RUN mkdir -p "${FOAM_RUN}/resources" && mkdir -p "${FOAM_RUN}/resources/foilData"
+COPY protocol-server/foilData/* "${FOAM_RUN}/resources/foilData/"
 
 # ---------------------------------------------------------------------------
 # Expose protocol server port

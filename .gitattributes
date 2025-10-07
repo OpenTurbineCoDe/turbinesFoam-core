@@ -1,3 +1,6 @@
 *.sh text eol=lf
 *.py text eol=lf
 Make/** text eol=lf
+# force LF for scripts/case runners
+Allrun          text eol=lf
+Allclean        text eol=lf
