@@ -75,7 +75,8 @@ class controlDict:
         # Calculate end time based on the tip speed ratio and number of revolutions
         omega = tsr * wind_speed / radius  # Angular velocity in rad/s
         one_rev = (2 * np.pi) / omega  # Time for one revolution in seconds
-        self.end_time = num_rev * one_rev  # Total simulation time in seconds
+        # self.end_time = num_rev * one_rev  # Total simulation time in seconds
+        self.end_time = 1e12  # Run until stopped manually
 
         # Set the time step based on the number of degrees per time step
         omega_deg = np.degrees(omega)  # Convert to degrees per second

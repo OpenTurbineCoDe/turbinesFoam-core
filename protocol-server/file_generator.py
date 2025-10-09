@@ -41,7 +41,7 @@ FoamFile
 }}
 // * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * //
 
-application     pimpleFoam;
+application     pimpleFoamMy;
 
 startFrom       startTime;
 
@@ -72,6 +72,10 @@ runTimeModifiable true;
 adjustTimeStep  false;
 
 maxCo           0.9;
+
+stepMode        true;
+
+stepFifo       step.pipe;
 
 libs
 (

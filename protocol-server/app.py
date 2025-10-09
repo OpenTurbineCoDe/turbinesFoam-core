@@ -6,7 +6,7 @@ import subprocess
 import uuid
 from pathlib import Path
 
-from fastapi import FastAPI, HTTPException
+from fastapi import BackgroundTasks, FastAPI, HTTPException
 from pydantic import BaseModel, Field, ConfigDict, RootModel
 
 from pathing import FOAM_RUN, FOAM_BASHRC
@@ -161,8 +161,8 @@ class RunOptions:
 # ---------------------------
 
 
-@app.post("/initialize")
-def initialize(payload: InitializeIn):
+@app.post("/initialize", status_code=202)
+def initialize(payload: InitializeIn, background_tasks: BackgroundTasks):
     """
     Prepares a fresh per-session case directory and (optionally) spawns the solver.
 
@@ -171,32 +171,61 @@ def initialize(payload: InitializeIn):
     print("Received /initialize payload")
     sid = str(uuid.uuid4())
 
-    # 1) Create/clean a case directory under FOAM_RUN/<sid>
+    # Create/clean a case directory under FOAM_RUN/<sid>
     util.make_directory_in_foam_run(sid)
     util.clear_case_directory(sid)
     util.copy_axial_turbine_case(sid)  # copies your base case template to FOAM_RUN/<sid>
 
-    # 2) Generate case-specific files
+    # Generate case-specific files
     model = TurbineModel(name="IEA_15MW_AB_OF")  # choose based on payload if needed
+    model.read_from_yaml()  # loads from models YAML
     run_opts = RunOptions()
-    # If your FileGenerator expects a *path*: pass FOAM_RUN / sid
     FileGenerator(model, run_opts).generate_files(FOAM_RUN / sid)
 
-    # 3) (Optional) Bring up solver; for "protocol-first", we only prep the FIFO.
+    # Create the step FIFO
     case_dir = FOAM_RUN / sid
     mkfifos(case_dir)
-    # If you want to launch now, uncomment:
-    # proc = start_allrun(case_dir)
-    # else keep None; we can launch on first /step if desired
-    proc = None
+    SESS[sid] = {"case_dir": str(case_dir), "proc": None, "status": "initializing"}
 
-    # 4) Register in session table
-    SESS[sid] = {"case_dir": str(case_dir), "proc": proc}
+    background_tasks.add_task(_boostrap_session, sid, payload)
 
-    # 5) Any other “one-shot” initialization
-    util.initialize_run(sid)
+    return {"status": "accepted", "session_id": sid}
+
+
+def _boostrap_session(sid: str, payload: InitializeIn):
+    """Background task to bootstrap a new session.
+
+    Args:
+        sid (str): Session ID
+        payload (InitializeIn): Initialization payload
+
+    Returns:
+        _type_: _description_
+    """
+    try:
+        print(f"Bootstrapping session {sid} in background task")
+
+        # 5) Any other “one-shot” initialization
+        util.initialize_run(sid)
+
+        # 6) Start the Allrun script to launch the solver
+        case_dir = Path(SESS[sid]["case_dir"])
+        proc = start_allrun(case_dir)
+        SESS[sid]["proc"] = proc
+        SESS[sid]["status"] = "ready"
+    except Exception as e:
+        print(f"Error bootstrapping session {sid}: {e}")
+        SESS[sid]["status"] = f"error: {e}"
 
     return {"status": "ok", "session_id": sid}
+
+
+@app.get("/status/{sid}")
+def status(sid: str):
+    s = SESS.get(sid)
+    if not s:
+        raise HTTPException(404, "unknown session")
+    return {"status": s.get("status")}
 
 
 @app.post("/step")
@@ -206,16 +235,19 @@ def step(payload: StepIn):
       - writes dt to the step FIFO to let the solver advance a single CFD step
       - (later) can stream kinematic inputs to your turbinesFoam API before the step
     """
+    print("Received /step payload")
     sid = payload.session_id
     sess = SESS.get(sid)
     if not sess:
         raise HTTPException(status_code=404, detail="invalid session_id")
 
+    print(f"Stepping session {sid} at t={payload.t} by dt={payload.dt}")
     case_dir = Path(sess["case_dir"])
 
     # TODO: map payload.inputs.* into your turbinesFoam external kinematics API here
     # e.g., write a JSON command file or call a small Python<->C++ bridge
 
+    print(f"Writing dt={payload.dt} to FIFO to advance one CFD step")
     # Minimal protocol-first: write dt to FIFO; solver advances one step
     write_step(case_dir, payload.dt)
 
@@ -274,11 +306,15 @@ def health():
 
 
 def mkfifos(case_dir: Path):
-    """Create the step FIFO used to synchronize single-step advances."""
     step = case_dir / "step.pipe"
     if step.exists():
         step.unlink()
     os.mkfifo(step, 0o666)
+
+    perf = case_dir / "perf.pipe"
+    if perf.exists():
+        perf.unlink()
+    os.mkfifo(perf, 0o666)
 
 
 def start_allrun(case_dir: Path) -> subprocess.Popen:
@@ -288,6 +324,7 @@ def start_allrun(case_dir: Path) -> subprocess.Popen:
     """
     env = os.environ.copy()
     env["FOAM_STEP_FIFO"] = str(case_dir / "step.pipe")
+    env["FOAM_PERF_FIFO"] = str(case_dir / "perf.pipe")
     return subprocess.Popen(
         ["bash", "-lc", f"source {FOAM_BASHRC} && chmod +x Allrun && ./Allrun"],
         cwd=str(case_dir),

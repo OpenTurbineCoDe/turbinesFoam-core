@@ -174,10 +174,15 @@ int main(int argc, char *argv[])
     #include "CourantNo.H"
     #include "setInitialDeltaT.H"
 
-    // Choose FIFO path from env or default ./step.pipe
+    const dictionary& cdict = runTime.controlDict();
+    const bool stepMode = cdict.lookupOrDefault<bool>("stepMode", false);
+
+    // pick FIFO path from controlDict, else env, else default
+    word fifoName = cdict.lookupOrDefault<word>("stepFifo", "step.pipe");
     const char* envFifo = std::getenv("FOAM_STEP_FIFO");
-    std::string stepFifo = envFifo ? std::string(envFifo) : std::string("step.pipe");
+    std::string stepFifo = envFifo ? std::string(envFifo) : std::string(fifoName);
     Info<< "External step FIFO: " << stepFifo << nl << endl;
+
     
     turbulence->validate();
 
@@ -195,14 +200,23 @@ int main(int argc, char *argv[])
     {
         #include "readDyMControls.H"
 
-        // --- External step control (FIFO)
-        Foam::scalar reqDt = -1.0;
-        bool stop = false;
-        if (readStepMessage(stepFifo, reqDt, stop))
+        if (stepMode)
         {
+            // BLOCK here until something is sent into the FIFO
+            Foam::scalar reqDt = -1.0;
+            bool stop = false;
+
+            // Keep trying until we successfully read a valid line
+            // (open() on a FIFO for reading will block until there is a writer)
+            while (!readStepMessage(stepFifo, reqDt, stop))
+            {
+                // Optional: small sleep to avoid tight loop if your read impl returns false quickly
+                ::usleep(1000);
+            }
+
             if (stop)
             {
-                Info<< "Received STOP. Ending." << nl << endl;
+                Info<< "Received STOP via FIFO. Ending." << nl << endl;
                 break;
             }
             if (reqDt > 0)
@@ -211,6 +225,7 @@ int main(int argc, char *argv[])
                 Info<< "Setting deltaT = " << reqDt << nl << endl;
             }
         }
+        // else (not stepMode): free-run as usual
 
         ++runTime;
 

@@ -20,5 +20,5 @@ if [ "$1" = "-parallel" ]
     app=$(getApplication)
     mpirun -np $nProc --oversubscribe $app -parallel > log.$app
 else
-    runApplication pimpleFoam
+    runApplication pimpleFoamMy
 fi

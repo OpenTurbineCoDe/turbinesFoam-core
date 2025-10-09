@@ -14,4 +14,4 @@ source "$CORE_HOME/.venv/bin/activate"
 cd "$CORE_HOME/protocol-server"
 
 # IMPORTANT: this assumes your FastAPI file is protocolserver.py with "app = FastAPI()"
-exec python3 -m uvicorn app:app --host 0.0.0.0 --port 5555 --workers 1
+exec python3 -m uvicorn app:app --host 0.0.0.0 --port 5555 --workers 1 --timeout-keep-alive 120

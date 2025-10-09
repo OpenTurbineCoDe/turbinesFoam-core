@@ -1,4 +1,5 @@
 import shutil
+import os
 from pathlib import Path
 from pathing import FOAM_RUN, AXIAL_SRC
 
@@ -34,16 +35,16 @@ def allrun_turbinesFoam_case(directory_name):
     print("Starting turbinesFoam simulation...")
 
     case_dir: Path = FOAM_RUN / directory_name
-    # TODO: Uncomment and use WSL commands to run Allrun script
-    # Set Allrun permissions for case directory
-    # permissions_command = f"chmod +x {ubuntu.path_to_ubuntu(case_dir / 'Allrun')}"
-    # print(f"Ubuntu permissions command: {permissions_command}")
-    # ubuntu.run_ubuntu_command(permissions_command)
 
-    # # Run the Allrun script in the case directory
-    # command = f"cd {ubuntu.path_to_ubuntu(case_dir)} && ./Allrun"
-    # print(f"Allrun execute command: {command}")
-    # ubuntu.run_ubuntu_command(command)
+    # Set Allrun permissions for case directory
+    print("Setting Allrun script permissions.")
+    permissions_command = f"chmod +x {case_dir / 'Allrun'}"
+    os.system(permissions_command)
+
+    # Run the Allrun script in the case directory
+    command = f"cd {case_dir} && ./Allrun"
+    print(f"Allrun execute command: {command}")
+    os.system(command)
 
 
 def allclean_turbinesFoam_case(directory_name):
