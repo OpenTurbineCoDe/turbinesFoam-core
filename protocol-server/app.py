@@ -5,6 +5,9 @@ import shutil
 import subprocess
 import uuid
 from pathlib import Path
+from enum import Enum
+from dataclasses import dataclass, field
+import time
 
 from fastapi import BackgroundTasks, FastAPI, HTTPException
 from pydantic import BaseModel, Field, ConfigDict, RootModel
@@ -13,77 +16,68 @@ from pathing import FOAM_RUN, FOAM_BASHRC
 import utils as util
 from file_generator import FileGenerator
 from turbine_model import TurbineModel
+import errno
+import selectors
+import json
+from typing import Optional, Dict, Any, List
 
 app = FastAPI()
 
+
 # In-memory session registry:
-#   key: session_id (str)
-#   val: {"case_dir": str, "proc": Popen | None, ...}
-SESS: Dict[str, Dict[str, Any]] = {}
+class State(str, Enum):
+    initializing = "initializing"
+    ready = "ready"
+    stepping = "stepping"
+    terminating = "terminating"
+    error = "error"
+
+
+@dataclass
+class Session:
+    case_dir: str
+    proc: subprocess.Popen | None = None
+    state: State = State.initializing
+    op_seq: int = 0
+    last_error: str | None = None
+    progress: float = 0.0
+    t: float = 0.0
+    message: Optional[str] = None
+    created_at: float = field(default_factory=time.time)
+    step_fd: Optional[int] = None
+    last_telemetry: Optional[Dict[str, Any]] = None  # <-- ADDED: Stores the STEPPED JSON with loads
+
+
+SESS: Dict[str, Session] = {}
 
 
 # ---------------------------
-# Pydantic models (v2 style)
+# Pydantic models (Simplified for brevity)
 # ---------------------------
 
 
 class Meta(BaseModel):
-    """
-    Example metadata passed by the client.
-
-    - model_config: enables population by field *alias* (so payload key "schema"
-      loads into our 'schema_name' field).
-    - Field(alias="schema"): tells Pydantic that the incoming JSON key is 'schema',
-      but we expose the attribute as 'schema_name' in Python.
-    """
-
     model_config = ConfigDict(populate_by_name=True)
-
-    schema_name: str = Field(alias="schema")  # incoming key "schema" -> schema_name
+    schema_name: str = Field(alias="schema")
     num_blades: int
     num_nodes_per_blade: int
 
 
-# RootModel is a thin wrapper to say "this model IS this type".
-# Useful when you want a type alias that still validates as a model.
-# Example: payload might contain arrays of fixed meaning.
-class R6(RootModel[List[float]]):
-    """Represents a flat list[6] of floats (e.g., [x,y,z,rx,ry,rz])."""
-
-    pass
-
-
-class R9(RootModel[List[float]]):
-    """Represents a flat list[9] of floats (e.g., orientation matrix)."""
-
-    pass
-
-
-# The following nested structures model the kinematics blocks coming from the FMU.
-# Each field is a list-of-floats; you can replace these with R6/R9 for stricter shapes.
-
-
-class Hub(BaseModel):
-    """Rigid-body hub/nacelle state (pos/orientation/vel/acc)."""
-
+class Hub(BaseModel):  # Minimal structure for demonstration
     pos: List[float]
     ori: List[float]
     vel: List[float]
     acc: List[float]
 
 
-class Root(BaseModel):
-    """Per-blade root states (list over blades)."""
-
+class Root(BaseModel):  # Minimal structure for demonstration
     pos: List[List[float]]
     ori: List[List[float]]
     vel: List[List[float]]
     acc: List[List[float]]
 
 
-class Mesh(BaseModel):
-    """Per-blade, per-node actuator-line states."""
-
+class Mesh(BaseModel):  # Minimal structure for demonstration
     pos: List[List[float]]
     ori: List[List[float]]
     vel: List[List[float]]
@@ -91,8 +85,6 @@ class Mesh(BaseModel):
 
 
 class InitialState(BaseModel):
-    """Initial CFD-side state snapshot at t0."""
-
     t0: float
     hub: Hub
     nacelle: Hub
@@ -101,24 +93,13 @@ class InitialState(BaseModel):
 
 
 class InitializeIn(BaseModel):
-    """
-    Top-level /initialize payload.
-
-    - meta: metadata/config that may control sizing or mapping
-    - constants: scalar constants (e.g., wind speed, rho, TSR setpoints, etc.)
-    - initial_state: full initial kinematic state to seed the simulation
-    """
-
     meta: Meta
     constants: Dict[str, float]
     initial_state: InitialState
-    # Optional: template dir or other hints
     template_dir: Optional[str] = None
 
 
 class StepInputs(BaseModel):
-    """Inputs at each step (same structure as parts of InitialState, plus meta)."""
-
     hub: Hub
     nacelle: Hub
     root: Root
@@ -127,33 +108,72 @@ class StepInputs(BaseModel):
 
 
 class StepIn(BaseModel):
-    """
-    /step payload.
-
-    - session_id: which running case to apply inputs to
-    - t, dt: wall/sim time bookkeeping
-    - inputs: the kinematic prescription for this step
-    """
-
     session_id: str
     t: float
     dt: float
     inputs: StepInputs
 
 
-# Simple holder for run configuration used by your FileGenerator
 class RunOptions:
     def __init__(self):
+        # ... (unchanged) ...
         self.case_name = "test_case"
         self.case_class = "axialFlowTurbineAL"
         self.num_revolutions = 1
-        self.time_step = 5  # degrees per time step (used by your generator)
+        self.time_step = 5
         self.model_tower = False
         self.model_hub = False
         self.tip_speed_ratio = 8
-        self.wind_speed = 12.8  # m/s
+        self.wind_speed = 12.8
         self.twist_offset = 0.0
-        self.tilt_angle = -6.0  # degrees
+        self.tilt_angle = -6.0
+
+
+# ---------------------------
+# Helpers
+# ---------------------------
+
+
+def _ack(sid: str, sess: Session) -> dict:
+    return {"status": "accepted", "session_id": sid, "op_seq": sess.op_seq}
+
+
+def _apply_op(sess: Session):
+    sess.op_seq += 1
+
+
+def open_step_writer(case_dir: Path) -> int:
+    path = case_dir / "step.pipe"
+    return os.open(str(path), os.O_WRONLY)
+
+
+def write_step_to_fd(fd: int, dt: float):
+    os.write(fd, f"{dt}\n".encode("ascii"))
+
+
+def _bootstrap_session(sid: str, payload: InitializeIn, background_tasks: BackgroundTasks):
+    sess = SESS[sid]
+    try:
+        case_dir = Path(sess.case_dir)
+
+        # 1. Start solver & reader
+        proc = start_allrun(case_dir)
+        sess.proc = proc
+        background_tasks.add_task(_perf_reader_task, sid)
+
+        # 2. Open persistent step writer (Blocks until solver is ready to read)
+        sess.step_fd = open_step_writer(case_dir)
+
+        # 3. UNBLOCK THE SOLVER'S INITIAL BLOCK and allow it to send READY
+        os.write(sess.step_fd, "CONT\n".encode("ascii"))
+
+        sess.message = "Solver launched. Waiting for READY signal..."
+        _apply_op(sess)
+
+    except Exception as e:
+        sess.state = State.error
+        sess.last_error = str(e)
+        _apply_op(sess)
 
 
 # ---------------------------
@@ -163,141 +183,204 @@ class RunOptions:
 
 @app.post("/initialize", status_code=202)
 def initialize(payload: InitializeIn, background_tasks: BackgroundTasks):
-    """
-    Prepares a fresh per-session case directory and (optionally) spawns the solver.
-
-    Returns: { "status": "ok", "session_id": "<uuid>" }
-    """
-    print("Received /initialize payload")
     sid = str(uuid.uuid4())
-
-    # Create/clean a case directory under FOAM_RUN/<sid>
     util.make_directory_in_foam_run(sid)
     util.clear_case_directory(sid)
-    util.copy_axial_turbine_case(sid)  # copies your base case template to FOAM_RUN/<sid>
+    util.copy_axial_turbine_case(sid)
 
-    # Generate case-specific files
-    model = TurbineModel(name="IEA_15MW_AB_OF")  # choose based on payload if needed
-    model.read_from_yaml()  # loads from models YAML
+    model = TurbineModel(name="IEA_15MW_AB_OF")
+    model.read_from_yaml()
     run_opts = RunOptions()
     FileGenerator(model, run_opts).generate_files(FOAM_RUN / sid)
 
-    # Create the step FIFO
-    case_dir = FOAM_RUN / sid
-    mkfifos(case_dir)
-    SESS[sid] = {"case_dir": str(case_dir), "proc": None, "status": "initializing"}
+    mkfifos(FOAM_RUN / sid)
+    SESS[sid] = Session(case_dir=str(FOAM_RUN / sid), state=State.initializing, op_seq=0)
 
-    background_tasks.add_task(_boostrap_session, sid, payload)
+    background_tasks.add_task(_bootstrap_session, sid, payload, background_tasks)
 
-    return {"status": "accepted", "session_id": sid}
-
-
-def _boostrap_session(sid: str, payload: InitializeIn):
-    """Background task to bootstrap a new session.
-
-    Args:
-        sid (str): Session ID
-        payload (InitializeIn): Initialization payload
-
-    Returns:
-        _type_: _description_
-    """
-    try:
-        print(f"Bootstrapping session {sid} in background task")
-
-        # 5) Any other “one-shot” initialization
-        util.initialize_run(sid)
-
-        # 6) Start the Allrun script to launch the solver
-        case_dir = Path(SESS[sid]["case_dir"])
-        proc = start_allrun(case_dir)
-        SESS[sid]["proc"] = proc
-        SESS[sid]["status"] = "ready"
-    except Exception as e:
-        print(f"Error bootstrapping session {sid}: {e}")
-        SESS[sid]["status"] = f"error: {e}"
-
-    return {"status": "ok", "session_id": sid}
+    return _ack(sid, SESS[sid])
 
 
 @app.get("/status/{sid}")
 def status(sid: str):
-    s = SESS.get(sid)
-    if not s:
+    sess = SESS.get(sid)
+    if not sess:
         raise HTTPException(404, "unknown session")
-    return {"status": s.get("status")}
+    return {
+        "state": sess.state,
+        "op_seq": sess.op_seq,
+        "progress": sess.progress,
+        "message": sess.message,
+        "t": sess.t,
+        "last_error": sess.last_error,
+        "last_outputs": sess.last_telemetry,  # <-- FINAL DATA POINT FOR FMU
+    }
 
 
-@app.post("/step")
-def step(payload: StepIn):
-    """
-    Pushes one time step:
-      - writes dt to the step FIFO to let the solver advance a single CFD step
-      - (later) can stream kinematic inputs to your turbinesFoam API before the step
-    """
-    print("Received /step payload")
+@app.post("/step", status_code=202)
+def step(payload: StepIn, background_tasks: BackgroundTasks):
     sid = payload.session_id
     sess = SESS.get(sid)
     if not sess:
-        raise HTTPException(status_code=404, detail="invalid session_id")
+        raise HTTPException(404, "invalid session_id")
+    if sess.state != State.ready:
+        raise HTTPException(409, f"busy: state={sess.state}")
 
-    print(f"Stepping session {sid} at t={payload.t} by dt={payload.dt}")
-    case_dir = Path(sess["case_dir"])
+    sess.state = State.stepping
+    _apply_op(sess)
+    current_op = sess.op_seq
 
-    # TODO: map payload.inputs.* into your turbinesFoam external kinematics API here
-    # e.g., write a JSON command file or call a small Python<->C++ bridge
-
-    print(f"Writing dt={payload.dt} to FIFO to advance one CFD step")
-    # Minimal protocol-first: write dt to FIFO; solver advances one step
-    write_step(case_dir, payload.dt)
-
-    # Return some echo/telemetry if you have it (e.g., azimuth, forces)
-    return {"status": "ok", "t": payload.t + payload.dt}
+    background_tasks.add_task(_do_step, sid, payload, current_op)
+    return _ack(sid, sess)
 
 
-@app.post("/terminate")
-def terminate(payload: Dict[str, str]):
-    """
-    Gracefully stop a running session:
-      - ask solver to exit
-      - reap the process
-      - delete the case directory
-    """
+def _do_step(sid: str, payload: StepIn, op_seq: int):
+    sess = SESS.get(sid)
+    if not sess or sess.op_seq != op_seq:
+        return
+    try:
+        if sess.step_fd is None:
+            raise RuntimeError("Step FD was not initialized.")
+
+        write_step_to_fd(sess.step_fd, payload.dt)
+
+        sess.t = payload.t + payload.dt
+        sess.message = f"Advanced dt={payload.dt}. Waiting for STEPPED signal..."
+
+    except Exception as e:
+        sess.state = State.error
+        sess.last_error = str(e)
+        _apply_op(sess)
+
+
+@app.post("/terminate", status_code=202)
+def terminate(payload: Dict[str, str], background_tasks: BackgroundTasks):
     sid = payload.get("session_id")
     if not sid:
-        raise HTTPException(status_code=400, detail="session_id required")
+        raise HTTPException(400, "session_id required")
 
-    sess = SESS.pop(sid, None)
+    sess = SESS.get(sid)
     if not sess:
-        # idempotent: it's already gone
-        return {"status": "ok"}
+        return {"status": "accepted"}
 
-    case_dir = Path(sess["case_dir"])
+    if sess.state == State.terminating:
+        return _ack(sid, sess)
 
-    # 1) ask solver loop to stop
-    send_stop(case_dir)
+    sess.state = State.terminating
+    _apply_op(sess)
+    current_op = sess.op_seq
+    background_tasks.add_task(_do_terminate, sid, current_op)
+    return _ack(sid, sess)
 
-    # 2) reap process if present
-    proc = sess.get("proc")
-    if proc is not None:
+
+def _do_terminate(sid: str, op_seq: int):
+    sess = SESS.get(sid)
+    if not sess or sess.op_seq != op_seq:
+        return
+    try:
+        if sess.step_fd is not None:
+            os.write(sess.step_fd, "STOP\n".encode("ascii"))
+            os.close(sess.step_fd)
+            sess.step_fd = None
+
+        if sess.proc is not None:
+            try:
+                sess.proc.wait(timeout=10)
+            except Exception:
+                sess.proc.kill()
+        shutil.rmtree(sess.case_dir, ignore_errors=True)
+    finally:
+        SESS.pop(sid, None)
+
+
+# ---------------------------
+# Background Tasks (Perf Reader)
+# ---------------------------
+
+
+def _open_perf_reader(case_dir: Path):
+    """Open perf.pipe for non-blocking reads."""
+    perf_path = case_dir / "perf.pipe"
+    fd = os.open(perf_path, os.O_RDONLY | os.O_NONBLOCK)
+    return os.fdopen(fd, "r", buffering=1)
+
+
+def _perf_reader_task(sid: str):
+    """Asynchronously monitors perf.pipe for solver signals (READY, STEPPED)."""
+    sess = SESS.get(sid)
+    if not sess:
+        return
+
+    case_dir = Path(sess.case_dir)
+    try:
+        fh = _open_perf_reader(case_dir)
+    except Exception:
+        sess = SESS.get(sid)
+        if sess:
+            sess.state = State.error
+            sess.last_error = "Could not open perf.pipe for reading."
+        return
+
+    sel = selectors.DefaultSelector()
+    sel.register(fh, selectors.EVENT_READ)
+
+    try:
+        while True:
+            if sid not in SESS:
+                break
+            events = sel.select(timeout=1.0)
+            if not events:
+                continue
+
+            line = fh.readline()
+            if not line:
+                sess = SESS.get(sid)
+                if sess:
+                    sess.state = State.error
+                    sess.last_error = "Solver process closed perf.pipe."
+                    _apply_op(sess)
+                break
+
+            s = line.strip()
+            try:
+                msg = json.loads(s)
+            except Exception:
+                msg = {"type": "TEXT", "raw": s}
+
+            sess = SESS.get(sid)
+            if not sess:
+                break
+
+            typ = msg.get("type", "").upper()
+            if typ == "READY":
+                sess.state = State.ready
+                sess.message = "Solver signaled READY."
+                sess.progress = 1.0
+                _apply_op(sess)
+            elif typ == "STEPPED":
+                if "time" in msg:
+                    try:
+                        sess.t = float(msg["time"])
+                    except Exception:
+                        pass
+
+                sess.last_telemetry = msg  # <--- STORE THE FULL JSON MESSAGE (contains meshFrcMom)
+
+                sess.state = State.ready
+                sess.message = f"Step complete. t={sess.t:.3f}"
+                _apply_op(sess)
+            else:
+                sess.message = f"Solver log: {s[:50]}..."
+
+    finally:
         try:
-            proc.wait(timeout=10)
+            sel.unregister(fh)
         except Exception:
-            proc.kill()
-
-    # 3) remove the session directory
-    shutil.rmtree(case_dir, ignore_errors=True)
-    return {"status": "ok"}
-
-
-@app.get("/")
-def root():
-    return {"status": "ok"}
-
-
-@app.get("/health")
-def health():
-    return {"status": "ok"}
+            pass
+        try:
+            fh.close()
+        except Exception:
+            pass
 
 
 # ---------------------------
@@ -320,7 +403,6 @@ def mkfifos(case_dir: Path):
 def start_allrun(case_dir: Path) -> subprocess.Popen:
     """
     Launch the case's Allrun in its directory, with FOAM env and FIFO path.
-    The solver should block on the FIFO after the first step, waiting for dt.
     """
     env = os.environ.copy()
     env["FOAM_STEP_FIFO"] = str(case_dir / "step.pipe")
@@ -333,18 +415,3 @@ def start_allrun(case_dir: Path) -> subprocess.Popen:
         stderr=subprocess.STDOUT,
         text=True,
     )
-
-
-def write_step(case_dir: Path, dt: float):
-    """Write a dt value to the FIFO to advance one CFD time step."""
-    with open(case_dir / "step.pipe", "w", buffering=1) as f:
-        f.write(f"{dt}\n")
-
-
-def send_stop(case_dir: Path):
-    """Signal the solver loop to stop via the FIFO."""
-    try:
-        with open(case_dir / "step.pipe", "w", buffering=1) as f:
-            f.write("STOP\n")
-    except Exception:
-        pass
