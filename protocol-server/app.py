@@ -8,9 +8,14 @@ from pathlib import Path
 from enum import Enum
 from dataclasses import dataclass, field
 import time
+import glob  # Used for file pattern matching
 
 from fastapi import BackgroundTasks, FastAPI, HTTPException
 from pydantic import BaseModel, Field, ConfigDict, RootModel
+
+# NOTE: You must ensure pandas is installed in your Docker environment!
+import pandas as pd  # Used for efficient CSV reading
+import numpy as np
 
 from pathing import FOAM_RUN, FOAM_BASHRC
 import utils as util
@@ -45,14 +50,16 @@ class Session:
     message: Optional[str] = None
     created_at: float = field(default_factory=time.time)
     step_fd: Optional[int] = None
-    last_telemetry: Optional[Dict[str, Any]] = None  # <-- ADDED: Stores the STEPPED JSON with loads
+    last_telemetry: Optional[Dict[str, Any]] = None  # Stores the STEPPED JSON + aggregated loads
+    num_blades: int = 0
+    num_nodes_per_blade: int = 0
 
 
 SESS: Dict[str, Session] = {}
 
 
 # ---------------------------
-# Pydantic models (Simplified for brevity)
+# Pydantic models
 # ---------------------------
 
 
@@ -63,21 +70,29 @@ class Meta(BaseModel):
     num_nodes_per_blade: int
 
 
-class Hub(BaseModel):  # Minimal structure for demonstration
+class R6(RootModel[List[float]]):
+    pass
+
+
+class R9(RootModel[List[float]]):
+    pass
+
+
+class Hub(BaseModel):
     pos: List[float]
     ori: List[float]
     vel: List[float]
     acc: List[float]
 
 
-class Root(BaseModel):  # Minimal structure for demonstration
+class Root(BaseModel):
     pos: List[List[float]]
     ori: List[List[float]]
     vel: List[List[float]]
     acc: List[List[float]]
 
 
-class Mesh(BaseModel):  # Minimal structure for demonstration
+class Mesh(BaseModel):
     pos: List[List[float]]
     ori: List[List[float]]
     vel: List[List[float]]
@@ -116,7 +131,6 @@ class StepIn(BaseModel):
 
 class RunOptions:
     def __init__(self):
-        # ... (unchanged) ...
         self.case_name = "test_case"
         self.case_class = "axialFlowTurbineAL"
         self.num_revolutions = 1
@@ -127,6 +141,68 @@ class RunOptions:
         self.wind_speed = 12.8
         self.twist_offset = 0.0
         self.tilt_angle = -6.0
+
+
+# ---------------------------
+# DATA AGGREGATION HELPER (Reads CSVs)
+# ---------------------------
+
+
+def aggregate_loads_from_csv(case_dir: Path, target_time: float) -> List[float]:
+    """
+    Reads all ActuatorLineElements CSV files for a specific time step, extracts
+    Fx, Fy, Fz, and returns a flattened list of (Num_Nodes * 6) components
+    [Fx, Fy, Fz, Mx=0, My=0, Mz=0].
+    """
+    # NOTE: Assuming the postProcessing directory is always '0'
+    LOADS_DIR = case_dir / "postProcessing" / "actuatorLineElements" / "0"
+
+    if not LOADS_DIR.exists():
+        print(f"ERROR: Loads directory not found at {LOADS_DIR}")
+        return []
+
+    # Find all element CSVs (e.g., turbine.blade1.element*.csv)
+    file_pattern = str(LOADS_DIR / "turbine.blade*.element*.csv")
+    load_files = sorted(glob.glob(file_pattern))
+
+    if not load_files:
+        print(f"WARNING: No load CSV files found in {LOADS_DIR}")
+        return []
+
+    mesh_frc_mom = []
+    TIME_COLUMN = "time"
+
+    # Loop through each blade/element CSV file
+    for file_path in load_files:
+        try:
+            df = pd.read_csv(file_path)
+
+            # Find the row where the 'time' column is near the target_time
+            time_match = df[
+                df[TIME_COLUMN].astype(float).ge(target_time - 1e-6)
+                & df[TIME_COLUMN].astype(float).le(target_time + 1e-6)
+            ]
+
+            if not time_match.empty:
+                row = time_match.iloc[0]
+
+                # Extracting the 3 force components (fx, fy, fz)
+                fx = row["fx"]
+                fy = row["fy"]
+                fz = row["fz"]
+
+                # Append the 6 components: 3 Forces + 3 Moments (placeholders)
+                mesh_frc_mom.extend([float(fx), float(fy), float(fz), 0.0, 0.0, 0.0])  # M = 0.0 placeholders
+            else:
+                # Time step not found: return zeros for this element
+                mesh_frc_mom.extend([0.0] * 6)
+
+        except Exception as e:
+            # Catch file read errors (e.g., missing columns, bad I/O)
+            print(f"Error processing CSV {file_path}: {e}")
+            mesh_frc_mom.extend([0.0] * 6)  # Maintain array size integrity
+
+    return mesh_frc_mom
 
 
 # ---------------------------
@@ -155,6 +231,8 @@ def _bootstrap_session(sid: str, payload: InitializeIn, background_tasks: Backgr
     sess = SESS[sid]
     try:
         case_dir = Path(sess.case_dir)
+        sess.num_blades = payload.meta.num_blades
+        sess.num_nodes_per_blade = payload.meta.num_nodes_per_blade
 
         # 1. Start solver & reader
         proc = start_allrun(case_dir)
@@ -213,7 +291,7 @@ def status(sid: str):
         "message": sess.message,
         "t": sess.t,
         "last_error": sess.last_error,
-        "last_outputs": sess.last_telemetry,  # <-- FINAL DATA POINT FOR FMU
+        "last_outputs": sess.last_telemetry,  # Final data point
     }
 
 
@@ -242,10 +320,12 @@ def _do_step(sid: str, payload: StepIn, op_seq: int):
         if sess.step_fd is None:
             raise RuntimeError("Step FD was not initialized.")
 
+        # 1. Write dt (Solver starts calculation)
         write_step_to_fd(sess.step_fd, payload.dt)
 
+        # 2. Update time optimistically (background task will verify)
         sess.t = payload.t + payload.dt
-        sess.message = f"Advanced dt={payload.dt}. Waiting for STEPPED signal..."
+        sess.message = f"Advanced dt={payload.dt}. Waiting for STEPPED signal and file write..."
 
     except Exception as e:
         sess.state = State.error
@@ -294,7 +374,7 @@ def _do_terminate(sid: str, op_seq: int):
 
 
 # ---------------------------
-# Background Tasks (Perf Reader)
+# Background Tasks (Perf Reader) - NOW INCLUDES CSV READING
 # ---------------------------
 
 
@@ -312,6 +392,7 @@ def _perf_reader_task(sid: str):
         return
 
     case_dir = Path(sess.case_dir)
+
     try:
         fh = _open_perf_reader(case_dir)
     except Exception:
@@ -357,18 +438,55 @@ def _perf_reader_task(sid: str):
                 sess.message = "Solver signaled READY."
                 sess.progress = 1.0
                 _apply_op(sess)
-            elif typ == "STEPPED":
-                if "time" in msg:
-                    try:
-                        sess.t = float(msg["time"])
-                    except Exception:
-                        pass
 
-                sess.last_telemetry = msg  # <--- STORE THE FULL JSON MESSAGE (contains meshFrcMom)
+            elif typ == "STEPPED":
+                # Final, verified time (sent by solver in the STEPPED message)
+                current_t = float(msg.get("time", sess.t))
+                sess.t = current_t
+                TARGET_N = sess.num_nodes_per_blade
+
+                # --- CRITICAL: BLOCK and read data from CSVs ---
+                try:
+                    case_dir = Path(sess.case_dir)
+                    current_t = float(msg.get("time", sess.t))
+                    sess.t = current_t
+
+                    loads_array = aggregate_loads_from_csv(case_dir, current_t)
+
+                    if len(loads_array) == 1008:
+                        loads_array = downsample_loads(loads_array, target_nodes_per_blade=TARGET_N)
+
+                    # --- FIX: Retrieve dimensions from the Session object ---
+                    N = sess.num_nodes_per_blade
+                    B = sess.num_blades
+
+                    total_expected_size = B * N * 6
+
+                    if len(loads_array) == total_expected_size:
+                        # Convert the flat list into a list of 6-element lists (the required 2D array structure)
+                        reshaped_loads = [loads_array[i : i + 6] for i in range(0, len(loads_array), 6)]
+
+                        # Store the reshaped 2D list/array structure
+                        msg["meshFrcMom"] = reshaped_loads
+
+                    else:
+                        # Log error and return empty data
+                        print(
+                            f"ERROR: Final loads array size mismatch. Expected {total_expected_size}, got {len(loads_array)}. Check CSV files."
+                        )
+                        msg["meshFrcMom"] = []
+
+                except Exception as e:
+                    print(f"WARNING: CSV reading failed: {e}")
+                    msg["meshFrcMom"] = []
+
+                # Store the final telemetry (includes meshFrcMom)
+                sess.last_telemetry = msg
 
                 sess.state = State.ready
-                sess.message = f"Step complete. t={sess.t:.3f}"
+                sess.message = f"Step complete. t={sess.t:.3f} (Loads read from CSVs)"
                 _apply_op(sess)
+
             else:
                 sess.message = f"Solver log: {s[:50]}..."
 
@@ -415,3 +533,50 @@ def start_allrun(case_dir: Path) -> subprocess.Popen:
         stderr=subprocess.STDOUT,
         text=True,
     )
+
+
+def downsample_loads(flat_loads_1008: List[float], target_nodes_per_blade: int = 9) -> List[float]:
+    """
+    Downsamples the 3-blade x 56-node load array (1008 components) to the
+    required (3 * 9 = 27) nodes (162 components) by averaging nodes into bins.
+
+    Args:
+        flat_loads_1008: The 1008-component list [F1x, F1y, F1z, M1x, ... F168z].
+        target_nodes_per_blade: The desired node count per blade (usually 9).
+
+    Returns:
+        A flattened list of (3 * 9 * 6) = 162 components.
+    """
+    # 1. Reshape the 1008 array into (168 total nodes, 6 components)
+    raw_array = np.array(flat_loads_1008).reshape(3, 56, 6)
+
+    downsampled_loads = []
+
+    # Source dimensions
+    NUM_BLADES = 3
+    SOURCE_NODES = 56
+
+    # Calculate bin size
+    bin_size = int(np.ceil(SOURCE_NODES / target_nodes_per_blade))  # 56 / 9 ≈ 6.22 -> 7 nodes per bin
+
+    for b in range(NUM_BLADES):
+        blade_data = raw_array[b]  # (56, 6) array
+
+        for t in range(target_nodes_per_blade):
+            # Define the slice for the current bin
+            start_index = t * bin_size
+            end_index = min((t + 1) * bin_size, SOURCE_NODES)
+
+            # Select the nodes in the current bin
+            bin_slice = blade_data[start_index:end_index, :]
+
+            if bin_slice.size > 0:
+                # 2. Average the forces/moments within the bin
+                avg_load_vector = np.mean(bin_slice, axis=0)
+
+                # 3. Flatten and append the 6 components
+                downsampled_loads.extend(avg_load_vector.tolist())
+            else:
+                downsampled_loads.extend([0.0] * 6)  # Should only happen if calculation is wrong
+
+    return downsampled_loads
