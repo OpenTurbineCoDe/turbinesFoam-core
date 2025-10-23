@@ -426,9 +426,8 @@ int stepFd = -1;
         if (stepFd >= 0 && Pstream::master())
 
         {
-
+            Info << "Signaling READY on perf.pipe." << nl << endl;
             writePerfReady();
-
             Info << "Signaled READY on perf.pipe." << nl << endl;
 
         }
