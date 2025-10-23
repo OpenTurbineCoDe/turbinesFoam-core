@@ -401,8 +401,9 @@ int stepFd = -1;
     {
 
         // This open() will block until the Core writes, which is a good startup sync.
-
+        Info << "DEBUG: Attempting to open step FIFO for reading..." << nl;
         stepFd = openStepFd(stepFifo);
+        Info << "DEBUG: Step FIFO open returned FD: " << stepFd << nl;
 
         if (stepFd < 0) {
 
