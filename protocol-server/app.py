@@ -511,11 +511,13 @@ def mkfifos(case_dir: Path):
     if step.exists():
         step.unlink()
     os.mkfifo(step, 0o666)
+    os.chmod(step, 0o666)
 
     perf = case_dir / "perf.pipe"
     if perf.exists():
         perf.unlink()
     os.mkfifo(perf, 0o666)
+    os.chmod(perf, 0o666)
 
 
 def start_allrun(case_dir: Path) -> subprocess.Popen:
