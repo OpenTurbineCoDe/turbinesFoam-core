@@ -205,6 +205,53 @@ def aggregate_loads_from_csv(case_dir: Path, target_time: float) -> List[float]:
     return mesh_frc_mom
 
 
+def aggregate_performance_from_csv(case_dir: Path, target_time: float) -> List[float]:
+    """
+    This reads the performance CSV files for a specific time step, and extracts
+    the overall cp, ct, cq values for each blade, returning them as a flat list.
+    """
+    PERF_DIR = case_dir / "postProcessing" / "turbines" / "0"
+
+    if not PERF_DIR.exists():
+        print(f"ERROR: Performance directory not found at {PERF_DIR}")
+        return []
+
+    file_pattern = str(PERF_DIR / "turbine.csv")
+    perf_files = sorted(glob.glob(file_pattern))
+
+    if not perf_files:
+        print(f"WARNING: No performance CSV files found in {PERF_DIR}")
+        return []
+
+    blade_performance = []
+    TIME_COLUMN = "time"
+
+    for file_path in perf_files:
+        try:
+            df = pd.read_csv(file_path)
+
+            time_match = df[
+                df[TIME_COLUMN].astype(float).ge(target_time - 1e-6)
+                & df[TIME_COLUMN].astype(float).le(target_time + 1e-6)
+            ]
+
+            if not time_match.empty:
+                row = time_match.iloc[0]
+
+                cp = row["cp"]  # Power coefficient
+                ct = row["cd"]  # Thrust Coefficient
+                cq = row["ct"]  # Torque Coefficient
+
+                blade_performance.extend([float(cp), float(ct), float(cq)])
+            else:
+                blade_performance.extend([0.0, 0.0, 0.0])
+
+        except Exception as e:
+            print(f"Error processing performance CSV {file_path}: {e}")
+            blade_performance.extend([0.0, 0.0, 0.0])
+
+    return blade_performance
+
 # ---------------------------
 # Helpers
 # ---------------------------
@@ -453,6 +500,7 @@ def _perf_reader_task(sid: str):
 
                     loads_array = aggregate_loads_from_csv(case_dir, current_t)
 
+                    # 1008 is used because it corresponds to 3 blades * 56 nodes/blade * 6 components
                     if len(loads_array) == 1008:
                         loads_array = downsample_loads(loads_array, target_nodes_per_blade=TARGET_N)
 
@@ -464,7 +512,7 @@ def _perf_reader_task(sid: str):
 
                     if len(loads_array) == total_expected_size:
                         # Convert the flat list into a list of 6-element lists (the required 2D array structure)
-                        reshaped_loads = [loads_array[i : i + 6] for i in range(0, len(loads_array), 6)]
+                        reshaped_loads = [loads_array[i:i + 6] for i in range(0, len(loads_array), 6)]
 
                         # Store the reshaped 2D list/array structure
                         msg["meshFrcMom"] = reshaped_loads
@@ -479,6 +527,23 @@ def _perf_reader_task(sid: str):
                 except Exception as e:
                     print(f"WARNING: CSV reading failed: {e}")
                     msg["meshFrcMom"] = []
+
+                try:
+                    blade_performance = aggregate_performance_from_csv(case_dir, current_t)
+                    expected_performance_size = 3  # cp, ct, cq
+
+                    if len(blade_performance) == expected_performance_size:
+
+                        # Store the reshaped 2D list/array structure
+                        msg["bladePerformance"] = blade_performance
+                    else:
+                        print(
+                            f"ERROR: Blade performance array size mismatch. Expected {expected_performance_size}, got {len(blade_performance)}. Check CSV files."
+                        )
+                        msg["bladePerformance"] = []
+                except Exception as e:
+                    print(f"WARNING: Performance CSV reading failed: {e}")
+                    msg["bladePerformance"] = []
 
                 # Store the final telemetry (includes meshFrcMom)
                 sess.last_telemetry = msg
