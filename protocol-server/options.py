@@ -4,6 +4,9 @@ from pathlib import Path
 import numpy as np
 import pandas as pd
 
+from dataclasses import dataclass, field
+from typing import List, Tuple, Union
+
 
 class turbineFoamAxialFlowOptions:
     def __init__(self, model: TurbineModel, run_options):
@@ -291,46 +294,217 @@ class fvOptions:
         self.density = model.fluid.density
 
 
+# ===================================================================
+# ==                   HEXMESH HELPER CLASSES                      ==
+# ===================================================================
+
+
+# Define the acceptable coordinate format
+Coord = List[float]
+
+
+@dataclass
+class GeometryObject:
+    """Defines a searchable primitive for snappyHexMesh geometry section."""
+
+    name: str
+    type: str = field(default="searchableBox")
+
+    # Coordinates (used for box min/max, or cylinder start/end)
+    start: Coord = field(default_factory=list)
+    end: Coord = field(default_factory=list)
+
+    # Specific to searchableCylinder
+    radius: float = 0.0
+
+    # Specific to searchableBox
+    min: Coord = field(default_factory=list)
+    max: Coord = field(default_factory=list)
+
+    # Specific to complex definitions (e.g., boolean ops)
+    name_expression: str = ""
+
+
+@dataclass
+class RefinementRegion:
+    """Defines a refinement rule based on a GeometryObject."""
+
+    name: str  # Must match a GeometryObject name
+    mode: str = "distance"  # 'distance', 'inside', or 'outside'
+
+    # List of (distance_in_meters, refinement_level) tuples
+    levels: List[Tuple[float, int]] = field(default_factory=list)
+
+    # Optional: 'endDirection' for axial grading
+    distance_mode: str = ""
+
+
 class HexMeshDict:
     def __init__(self, model: TurbineModel, run_options: dict):
-        # Which steps to run
-        diameter = model.blade.radius * 2
+
+        # ===================================================================
+        # ==                    MESHING STEP CONTROLS                      ==
+        # ===================================================================
         self.casellated_mesh = True
-        self.snap = True
-        self.addLayers = True
-        self.turbine_radius = model.blade.radius
+        self.snap = True  # Use for tower / hub geometry
+        self.addLayers = False  # Turning this off since ALM does not have layers
+        max_refinement_level = 4  # Overall max refinement level
 
-        # Geometry definitions for meshing
-        self.turbine_type = "searchableCylinder"
-        inflow = -1 * self.turbine_radius
-        outflow = self.turbine_radius
-        self.turbine_point1 = [inflow, 0, 0]
-        self.turbine_point2 = [outflow, 0, 0]
-
-        self.tower_type = "searchableCylinder"
-        self.tower_point1 = [0, 0, -model.tower.height]  # Tower base to top
-        self.tower_point2 = [0, 0, 0]  # Half the tower diameter
-
-        self.turb_zone = "searchableBox"
-        margin = 3.0 * model.blade.radius  # or more depending on inflow/outflow
-        self.minimum = [-15 * diameter, -margin, -margin]
-        self.maximum = [7 * diameter, margin, margin]
-
-        # Castellated Mesh Controls
         self.max_local_cells = 500000
-        self.max_global_cells = 10000000
+        self.max_global_cells = 25e6
         self.min_refinement_cells = 0
         self.max_load_unbalance = 0.10
-        self.n_cells_between_levels = 1  # Number of buffer layers between different levels
+        self.n_cells_between_levels = 2
 
-        # Explicit feature edge refinement
-        # None for now
+        R = model.blade.radius
+        D = R * 2.0
+        Hub_Height = model.fluid.reference_height
+        Rotor_Center_X = model.hub.overhang
+        Rotor_Center_Y = 0
+        Rotor_Center_Z = 0  # As clarified: Rotor Center is Z=0
 
-        # Surface based refinement
-        # None for now
+        # --- Calculated Axial Coordinates (X-axis) ---
+        X_hub = Rotor_Center_X
+        X_min = X_hub - 3.0 * D  # Inlet (e.g., -3D)
+        X_max = X_hub + 10.0 * D  # Outlet (e.g., +10D)
 
-        # Region-wise refinement
-        # None for now
+        # Intermediate points for wake segments (relative to hub)
+        X_neg1D = X_hub - 1.0 * D
+        X_0D = X_hub
+        X_3D = X_hub + 3.0 * D
+        X_6D = X_hub + 6.0 * D
+        X_10D = X_hub + 10.0 * D
+
+        Y_Z_lateral = 1.5 * D  # Lateral dimension for boxes (1.5D)
+
+        D_min_L4 = D / 64.0  # 3.75 m (Target L4 cell size)
+
+        # --- List to hold all Geometry Objects ---
+        self.geometry_objects: List[GeometryObject] = []
+
+        # ===================================================================
+        # == 2. ZONE GEOMETRY DEFINITION (Using Dataclasses) ==
+        # ===================================================================
+
+        # 1. Core Refinement Disc (L4 Source)
+        disc_half_length = 0.01 * D
+        self.geometry_objects.append(
+            GeometryObject(
+                name="core_disc",
+                type="searchableCylinder",
+                radius=1.1 * R,
+                start=[X_hub - disc_half_length, Rotor_Center_Y, Rotor_Center_Z],
+                end=[X_hub + disc_half_length, Rotor_Center_Y, Rotor_Center_Z],
+            )
+        )
+
+        # 2. Upstream Cylinder
+        self.geometry_objects.append(
+            GeometryObject(
+                name="upstream_seg",
+                type="searchableCylinder",
+                radius=1.2 * R,
+                start=[X_min, Rotor_Center_Y, Rotor_Center_Z],
+                end=[X_neg1D, Rotor_Center_Y, Rotor_Center_Z],
+            )
+        )
+        # 3. Close Wake Cylinder (0D to 3D) - L3 Zone
+        self.geometry_objects.append(
+            GeometryObject(
+                name="close_wake_seg",
+                type="searchableCylinder",
+                radius=1.2 * R,
+                start=[X_neg1D, Rotor_Center_Y, Rotor_Center_Z],
+                end=[X_3D, Rotor_Center_Y, Rotor_Center_Z],
+            )
+        )
+
+        # 4. Mid Wake Cylinder (3D to 6D) - L2 Zone
+        self.geometry_objects.append(
+            GeometryObject(
+                name="midfield_seg",
+                type="searchableCylinder",
+                radius=1.2 * R,
+                start=[X_3D, Rotor_Center_Y, Rotor_Center_Z],
+                end=[X_6D, Rotor_Center_Y, Rotor_Center_Z],
+            )
+        )
+
+        # 5. Far Wake Cylinder (6D to 8D) - L2 Zone
+        self.geometry_objects.append(
+            GeometryObject(
+                name="far_wake_seg",
+                type="searchableCylinder",
+                radius=1.2 * R,
+                start=[X_6D, Rotor_Center_Y, Rotor_Center_Z],
+                end=[X_10D, Rotor_Center_Y, Rotor_Center_Z],
+            )
+        )
+
+        # 6. Full Domain Box (Lateral/Final Buffer) - L1 Zone
+        self.geometry_objects.append(
+            GeometryObject(
+                name="farfield_box",
+                type="searchableBox",
+                min=[X_min, -Y_Z_lateral, -Y_Z_lateral],
+                max=[X_max, Y_Z_lateral, Y_Z_lateral],  # Z_max needs to be R + margin above hub (Z=0)
+            )
+        )
+
+        # ===================================================================
+        # == 3. REFINEMENT REGIONS (Using Dataclasses) ==
+        # ===================================================================
+
+        HIGH_RES = False
+
+        CORE_REFINEMENT_LEVEL = 4 if HIGH_RES else 3  # Default 4
+        UPSTREAM_REFINEMENT_LEVEL = 2 if HIGH_RES else 1  # Default 2
+        CLOSE_WAKE_REFINEMENT_LEVEL = 3 if HIGH_RES else 1  # Default 3
+        MIDFIELD_REFINEMENT_LEVEL = 2 if HIGH_RES else 1  # Default 2
+        FAR_WAKE_REFINEMENT_LEVEL = 1  # Default 1
+        FARFIELD_REFINMENT_LEVEL = 1  # Default 1
+
+        self.refinement_regions: List[RefinementRegion] = [
+            # 1. CORE L4/L3: Distance mode on the thin disc (highest priority)
+            RefinementRegion(
+                name="core_disc",
+                mode="distance",
+                levels=[
+                    (0.05 * D, CORE_REFINEMENT_LEVEL),  # L4 up to 1.8m
+                    (0.10 * D, CORE_REFINEMENT_LEVEL - 1),  # L3 up to 3.6m
+                ],
+            ),
+            # 2. UPSTREAM SEGMENT (-3D to -1D) - L2 Uniform
+            RefinementRegion(
+                name="upstream_seg",
+                mode="inside",
+                levels=[(1.0, UPSTREAM_REFINEMENT_LEVEL)],  # L2
+            ),
+            # 3. CLOSE WAKE SEGMENT (0D to 3D) - L3 Uniform
+            RefinementRegion(
+                name="close_wake_seg",
+                mode="inside",
+                levels=[(1.0, CLOSE_WAKE_REFINEMENT_LEVEL)],  # L3
+            ),
+            # 4. MIDFIELD SEGMENT (3D to 6D) - L2 Uniform
+            RefinementRegion(
+                name="midfield_seg",
+                mode="inside",
+                levels=[(1.0, MIDFIELD_REFINEMENT_LEVEL)],  # L2
+            ),
+            # 4. FAR WAKE SEGMENT (6D to 10D) - L1 Uniform
+            RefinementRegion(
+                name="far_wake_seg",
+                mode="inside",
+                levels=[(1.0, FAR_WAKE_REFINEMENT_LEVEL)],  # L1
+            ),
+            # 5. FARFIELD BOX (Lateral/Domain Buffer) - L1 Uniform
+            RefinementRegion(
+                name="farfield_box",
+                mode="inside",
+                levels=[(1.0, FARFIELD_REFINMENT_LEVEL)],  # L1
+            ),
+        ]
 
         # Mesh selection
         # None for now
@@ -338,8 +512,8 @@ class HexMeshDict:
         # Snap controls
         self.nSmoothPatch = 5  # Number of patch smoothing iterations
         self.tolerance = 2.0  # Maximum distance from surface to snap
-        self.nSolveIter = 40  # Number of mesh displacement relaxation iterations
-        self.nRelaxIter = 10  # Maximum number of snapping relaxation iterations
+        self.nSolveIter = 100  # Number of mesh displacement relaxation iterations
+        self.nRelaxIter = 20  # Maximum number of snapping relaxation iterations
 
         # Feature snapping
         self.nFeatureSnapIter = 10
@@ -370,7 +544,7 @@ class HexMeshDict:
         self.maxNoneOrtho = 70
         self.max_boundary_skewness = 20
         self.max_internal_skewness = 5
-        self.max_concave = 80
+        self.max_concave = 60
         self.minVol = 1e-13
         self.min_tet_quality = 1e-30
         self.min_area = -1

@@ -4,6 +4,8 @@ from pathlib import Path
 from turbine_model import TurbineModel
 from options import BlockMesh, topoDict, fvOptions, HexMeshDict, elementData, controlDict
 
+from typing import List
+
 
 class FileGenerator:
     def __init__(self, turbine: TurbineModel, run_options):
@@ -460,8 +462,77 @@ FoamFile
 
         return None
 
+    # ===================================================================
+    # ==                   SNAPPY HEX HELPERS                          ==
+    # ===================================================================
+
+    def _format_coordinates(self, coords: List[float]) -> str:
+        """Helper to format a list of coordinates into OpenFOAM format."""
+        return f"({coords[0]:.2f} {coords[1]:.2f} {coords[2]:.2f})"
+
+    def _generate_geometry_section(self, geometry_objects: List) -> str:
+        """Generates the geometry dictionary content."""
+        geo_content = ""
+        for obj in geometry_objects:
+            # Handle specific properties for boxes vs. cylinders
+            if obj.type == "searchableCylinder":
+                props = (
+                    f"            point1 {self._format_coordinates(obj.start)};\n"
+                    f"            point2 {self._format_coordinates(obj.end)};\n"
+                    f"            radius {obj.radius:.2f};\n"
+                )
+            elif obj.type == "searchableBox":
+                props = (
+                    f"            min {self._format_coordinates(obj.min)};\n"
+                    f"            max {self._format_coordinates(obj.max)};\n"
+                )
+            else:
+                continue  # Skip unknown types
+
+            geo_content += (
+                f"        {obj.name}\n" f"        {{\n" f"            type {obj.type};\n" f"{props}" f"        }}\n\n"
+            )
+        return geo_content.strip()
+
+    def _generate_refinement_section(self, refinement_regions: List) -> str:
+        """Generates the refinementRegions dictionary content."""
+        refine_content = ""
+        for region in refinement_regions:
+            # Format the levels list: [(dist, level), ...]
+            levels_str = "\n".join(f"                    ({dist:.4f} {level})" for dist, level in region.levels)
+
+            # Distance mode requires nested levels, inside mode uses one line
+            level_block = f"                levels (\n{levels_str}\n                );"
+
+            # Handle optional distanceMode
+            distance_mode_line = ""
+            if region.distance_mode:
+                distance_mode_line = f"            distanceMode {region.distance_mode};\n"
+
+            refine_content += (
+                f"        {region.name}\n"
+                f"        {{\n"
+                f"            mode {region.mode};\n"
+                f"{distance_mode_line}"
+                f"{level_block}\n"
+                f"        }}\n"
+            )
+        return refine_content.strip()
+
+    # ===================================================================
+    # ==                  SNAPPY HEX FILE GENERATOR                    ==
+    # ===================================================================
+
     def generate_snappyHexMeshDict(self, file_path: Path):
         """Generates the snappyHexMeshDict file for the axialFlowTurbine case."""
+        # Load the template and fill in dynamic sections
+
+        # 1. Generate the geometry content dynamically
+        geometry_content = self._generate_geometry_section(self.snappy.geometry_objects)
+
+        # 2. Generate the refinement regions content dynamically
+        refinement_content = self._generate_refinement_section(self.snappy.refinement_regions)
+
         contents = f"""/*--------------------------------*- C++ -*----------------------------------*\\
     | =========                 |                                                 |
     | \\      /  F ield         | OpenFOAM: The Open Source CFD Toolbox           |
@@ -493,28 +564,7 @@ FoamFile
     // - to 'snap' the mesh boundary to the surface
     geometry
     {{
-        turbine
-        {{
-            type {self.snappy.turbine_type};
-            point1 (-1 0 0);   // Adjust to start from the hub along the z-axis
-            point2 (1 0 0);         // End at the rotor apex
-            radius 121;             // Set to HubRad to match the rotor radius
-        }}
-
-        tower
-        {{
-            type {self.snappy.tower_type};
-            point1 (0 0 -130.6);    // Tower base to top
-            point2 (0 0 0);
-            radius 4.15;            // Half the tower max diameter
-        }}
-
-        turb_zone
-        {{
-            type {self.snappy.turb_zone};
-            min (-125 -125 -130.6); // Domain bounds to encompass blade and tower
-            max (125 125 115.6);
-        }}
+{geometry_content}
     }};
 
 
@@ -605,17 +655,7 @@ FoamFile
 
         refinementRegions
         {{
-            //~ turbine
-            //~ {{
-                //~ mode inside;
-                //~ levels ((1 1));
-            //~ }}
-
-            turb_zone
-            {{
-                mode        inside;
-                levels      ((1e15 1));
-            }}
+{refinement_content}
         }}
 
 
@@ -657,11 +697,11 @@ FoamFile
         tolerance 2.0;
 
         // Number of mesh displacement relaxation iterations.
-        nSolveIter 40;
+        nSolveIter {self.snappy.nSolveIter};
 
         // Maximum number of snapping relaxation iterations. Should stop
         // before upon reaching a correct mesh.
-        nRelaxIter 10;
+        nRelaxIter {self.snappy.nRelaxIter};
 
         // Feature snapping
 
@@ -781,7 +821,7 @@ FoamFile
         //- Max concaveness allowed. Is angle (in degrees) below which concavity
         //  is allowed. 0 is straight face, <0 would be convex face.
         //  Set to 180 to disable.
-        maxConcave 80;
+        maxConcave {self.snappy.max_concave};
 
         //- Minimum pyramid volume. Is absolute volume of cell pyramid.
         //  Set to a sensible fraction of the smallest cell volume expected.
