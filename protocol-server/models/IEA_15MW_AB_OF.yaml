@@ -56,7 +56,7 @@ fluid:
   thermal_expansion_coefficient: 0.00343
   turbulence_intensity: 0.1
   turbulence_length_scale: 0.1
-  velocity: 11.4
+  velocity: 12.8
 hub:
   overhang: -10.86
   radius: 5.54

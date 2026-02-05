@@ -53,6 +53,7 @@ class Session:
     last_telemetry: Optional[Dict[str, Any]] = None  # Stores the STEPPED JSON + aggregated loads
     num_blades: int = 0
     num_nodes_per_blade: int = 0
+    tip_speed_ratio: float = 0.0
 
 
 SESS: Dict[str, Session] = {}
@@ -68,6 +69,7 @@ class Meta(BaseModel):
     schema_name: str = Field(alias="schema")
     num_blades: int
     num_nodes_per_blade: int
+    tip_speed_ratio: float
 
 
 class R6(RootModel[List[float]]):
@@ -148,36 +150,40 @@ class RunOptions:
 # ---------------------------
 
 
-def aggregate_loads_from_csv(case_dir: Path, target_time: float) -> List[float]:
+def aggregate_loads_from_csv(case_dir: Path, target_time: float) -> pd.DataFrame:
     """
-    Reads all ActuatorLineElements CSV files for a specific time step, extracts
-    Fx, Fy, Fz, and returns a flattened list of (Num_Nodes * 6) components
-    [Fx, Fy, Fz, Mx=0, My=0, Mz=0].
+    Reads all CSVs and returns a DataFrame [blade, node, time, fx, fy, fz].
     """
-    # NOTE: Assuming the postProcessing directory is always '0'
     LOADS_DIR = case_dir / "postProcessing" / "actuatorLineElements" / "0"
 
     if not LOADS_DIR.exists():
-        print(f"ERROR: Loads directory not found at {LOADS_DIR}")
-        return []
+        print(f"ERROR: Loads directory not found at {LOADS_DIR}", flush=True)
+        return pd.DataFrame()
 
-    # Find all element CSVs (e.g., turbine.blade1.element*.csv)
     file_pattern = str(LOADS_DIR / "turbine.blade*.element*.csv")
     load_files = sorted(glob.glob(file_pattern))
 
     if not load_files:
-        print(f"WARNING: No load CSV files found in {LOADS_DIR}")
-        return []
+        print(f"WARNING: No load CSV files found in {LOADS_DIR}", flush=True)
+        return pd.DataFrame()
 
-    mesh_frc_mom = []
+    debug_rows = []
     TIME_COLUMN = "time"
 
-    # Loop through each blade/element CSV file
     for file_path in load_files:
         try:
+            # Parse filename for metadata
+            filename = os.path.basename(file_path)
+            # Expected format: turbine.blade1.element0.csv
+            blade_part = filename.split(".blade")[1].split(".element")[0]
+            node_part = filename.split(".element")[1].split(".csv")[0]
+
+            blade_num = int(blade_part)
+            node_num = int(node_part)
+
             df = pd.read_csv(file_path)
 
-            # Find the row where the 'time' column is near the target_time
+            # Find matching time row
             time_match = df[
                 df[TIME_COLUMN].astype(float).ge(target_time - 1e-6)
                 & df[TIME_COLUMN].astype(float).le(target_time + 1e-6)
@@ -185,24 +191,24 @@ def aggregate_loads_from_csv(case_dir: Path, target_time: float) -> List[float]:
 
             if not time_match.empty:
                 row = time_match.iloc[0]
-
-                # Extracting the 3 force components (fx, fy, fz)
-                fx = row["fx"]
-                fy = row["fy"]
-                fz = row["fz"]
-
-                # Append the 6 components: 3 Forces + 3 Moments (placeholders)
-                mesh_frc_mom.extend([float(fx), float(fy), float(fz), 0.0, 0.0, 0.0])  # M = 0.0 placeholders
-            else:
-                # Time step not found: return zeros for this element
-                mesh_frc_mom.extend([0.0] * 6)
+                debug_rows.append(
+                    {
+                        "blade": blade_num,
+                        "node": node_num,
+                        "time": float(row["time"]),
+                        "fx": float(row["fx"]),
+                        "fy": float(row["fy"]),
+                        "fz": float(row["fz"]),
+                    }
+                )
 
         except Exception as e:
-            # Catch file read errors (e.g., missing columns, bad I/O)
-            print(f"Error processing CSV {file_path}: {e}")
-            mesh_frc_mom.extend([0.0] * 6)  # Maintain array size integrity
+            print(f"Error processing CSV {file_path}: {e}", flush=True)
 
-    return mesh_frc_mom
+    if debug_rows:
+        return pd.DataFrame(debug_rows)
+    else:
+        return pd.DataFrame(columns=["blade", "node", "time", "fx", "fy", "fz"])
 
 
 def aggregate_performance_from_csv(case_dir: Path, target_time: float) -> List[float]:
@@ -252,6 +258,7 @@ def aggregate_performance_from_csv(case_dir: Path, target_time: float) -> List[f
 
     return blade_performance
 
+
 # ---------------------------
 # Helpers
 # ---------------------------
@@ -280,6 +287,7 @@ def _bootstrap_session(sid: str, payload: InitializeIn, background_tasks: Backgr
         case_dir = Path(sess.case_dir)
         sess.num_blades = payload.meta.num_blades
         sess.num_nodes_per_blade = payload.meta.num_nodes_per_blade
+        sess.tip_speed_ratio = payload.meta.tip_speed_ratio
 
         # 1. Start solver & reader
         proc = start_allrun(case_dir)
@@ -316,6 +324,7 @@ def initialize(payload: InitializeIn, background_tasks: BackgroundTasks):
     model = TurbineModel(name="IEA_15MW_AB_OF")
     model.read_from_yaml()
     run_opts = RunOptions()
+    run_opts.tip_speed_ratio = payload.meta.tip_speed_ratio
     FileGenerator(model, run_opts).generate_files(FOAM_RUN / sid)
 
     mkfifos(FOAM_RUN / sid)
@@ -498,11 +507,11 @@ def _perf_reader_task(sid: str):
                     current_t = float(msg.get("time", sess.t))
                     sess.t = current_t
 
-                    loads_array = aggregate_loads_from_csv(case_dir, current_t)
+                    # 1. Get DataFrame
+                    loads_df = aggregate_loads_from_csv(case_dir, current_t)
 
-                    # 1008 is used because it corresponds to 3 blades * 56 nodes/blade * 6 components
-                    if len(loads_array) == 1008:
-                        loads_array = downsample_loads(loads_array, target_nodes_per_blade=TARGET_N)
+                    # 2. Pass DataFrame to Downsampler
+                    loads_flat_list = downsample_loads(loads_df, target_nodes_per_blade=TARGET_N)
 
                     # --- FIX: Retrieve dimensions from the Session object ---
                     N = sess.num_nodes_per_blade
@@ -510,22 +519,19 @@ def _perf_reader_task(sid: str):
 
                     total_expected_size = B * N * 6
 
-                    if len(loads_array) == total_expected_size:
-                        # Convert the flat list into a list of 6-element lists (the required 2D array structure)
-                        reshaped_loads = [loads_array[i:i + 6] for i in range(0, len(loads_array), 6)]
-
-                        # Store the reshaped 2D list/array structure
+                    if len(loads_flat_list) == total_expected_size:
+                        # Convert flat list to 2D structure
+                        reshaped_loads = [loads_flat_list[i : i + 6] for i in range(0, len(loads_flat_list), 6)]
                         msg["meshFrcMom"] = reshaped_loads
-
                     else:
-                        # Log error and return empty data
                         print(
-                            f"ERROR: Final loads array size mismatch. Expected {total_expected_size}, got {len(loads_array)}. Check CSV files."
+                            f"ERROR: Size mismatch. Expected {total_expected_size}, got {len(loads_flat_list)}",
+                            flush=True,
                         )
                         msg["meshFrcMom"] = []
 
                 except Exception as e:
-                    print(f"WARNING: CSV reading failed: {e}")
+                    print(f"WARNING: CSV reading failed: {e}", flush=True)
                     msg["meshFrcMom"] = []
 
                 try:
@@ -602,48 +608,88 @@ def start_allrun(case_dir: Path) -> subprocess.Popen:
     )
 
 
-def downsample_loads(flat_loads_1008: List[float], target_nodes_per_blade: int = 9) -> List[float]:
+def resample_conserving_sum(source_forces: np.ndarray, n_target: int) -> np.ndarray:
     """
-    Downsamples the 3-blade x 56-node load array (1008 components) to the
-    required (3 * 9 = 27) nodes (162 components) by averaging nodes into bins.
+    Resamples an array of forces from size N_source to N_target while:
+    1. Conserving the TOTAL sum of forces (Integral conservation).
+    2. Handling fractional overlaps (if a source node splits across target bins).
 
     Args:
-        flat_loads_1008: The 1008-component list [F1x, F1y, F1z, M1x, ... F168z].
-        target_nodes_per_blade: The desired node count per blade (usually 9).
+        source_forces: Numpy array of shape (N_source, 3) [fx, fy, fz]
+        n_target: Integer number of desired output nodes.
 
     Returns:
-        A flattened list of (3 * 9 * 6) = 162 components.
+        target_forces: Numpy array of shape (N_target, 3)
     """
-    # 1. Reshape the 1008 array into (168 total nodes, 6 components)
-    raw_array = np.array(flat_loads_1008).reshape(3, 56, 6)
+    n_source = len(source_forces)
+    target_forces = np.zeros((n_target, source_forces.shape[1]))
 
-    downsampled_loads = []
+    # Calculate the ratio of Source Nodes to Target Nodes
+    scale = n_source / n_target
 
-    # Source dimensions
-    NUM_BLADES = 3
-    SOURCE_NODES = 56
+    for i in range(n_target):
+        # Define the continuous range (in source index units) that Target Node 'i' covers
+        s_start = i * scale
+        s_end = (i + 1) * scale
 
-    # Calculate bin size
-    bin_size = int(np.ceil(SOURCE_NODES / target_nodes_per_blade))  # 56 / 9 ≈ 6.22 -> 7 nodes per bin
+        # Identify which integer Source indices overlap with this continuous range
+        idx_start = int(np.floor(s_start))
+        idx_end = int(np.ceil(s_end))
 
-    for b in range(NUM_BLADES):
-        blade_data = raw_array[b]  # (56, 6) array
+        for j in range(idx_start, idx_end):
+            # Boundary check
+            if j >= n_source:
+                continue
 
-        for t in range(target_nodes_per_blade):
-            # Define the slice for the current bin
-            start_index = t * bin_size
-            end_index = min((t + 1) * bin_size, SOURCE_NODES)
+            # Calculate the fractional overlap/weight
+            # Source Node 'j' conceptually covers the index range [j, j+1]
+            overlap_start = max(s_start, j)
+            overlap_end = min(s_end, j + 1)
+            weight = max(0.0, overlap_end - overlap_start)
 
-            # Select the nodes in the current bin
-            bin_slice = blade_data[start_index:end_index, :]
+            # Add the weighted portion of the source force to the target node
+            target_forces[i] += source_forces[j] * weight
 
-            if bin_slice.size > 0:
-                # 2. Average the forces/moments within the bin
-                avg_load_vector = np.mean(bin_slice, axis=0)
+    return target_forces
 
-                # 3. Flatten and append the 6 components
-                downsampled_loads.extend(avg_load_vector.tolist())
-            else:
-                downsampled_loads.extend([0.0] * 6)  # Should only happen if calculation is wrong
 
-    return downsampled_loads
+def downsample_loads(loads_df: pd.DataFrame, target_nodes_per_blade: int = 9) -> List[float]:
+    """
+    Downsamples loads by SUMMING forces (conserving load) and handling
+    fractional node overlap.
+    """
+    downsampled_flat_list = []
+
+    # We explicitly loop over blades 1, 2, 3
+    for blade_idx in [1, 2, 3]:
+        # Extract forces for this blade, sorted by node
+        if not loads_df.empty:
+            blade_df = loads_df[loads_df["blade"] == blade_idx].sort_values("node")
+            raw_forces = blade_df[["fx", "fy", "fz"]].values
+        else:
+            raw_forces = np.array([])
+
+        # Handle missing data or empty blade
+        if len(raw_forces) == 0:
+            # Append zeros for this entire blade
+            downsampled_flat_list.extend([0.0] * (target_nodes_per_blade * 6))
+            continue
+
+        # --- PERFORM CONSERVATIVE RESAMPLING ---
+        # This replaces simple binning/averaging
+        resampled_forces = resample_conserving_sum(raw_forces, target_nodes_per_blade)
+
+        # Flatten and add moments (0.0)
+        for force_vec in resampled_forces:
+            downsampled_flat_list.extend(
+                [
+                    float(force_vec[0]),  # Fx
+                    float(force_vec[1]),  # Fy
+                    float(force_vec[2]),  # Fz
+                    0.0,
+                    0.0,
+                    0.0,  # Moments
+                ]
+            )
+
+    return downsampled_flat_list

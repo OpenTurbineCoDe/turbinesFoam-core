@@ -126,7 +126,7 @@ class Environment:
 class Fluid:
     def __init__(self):
         # Free stream properties
-        self.velocity = 11.4  # (m/s)
+        self.velocity = 12.8  # (m/s)
         self.turbulence_intensity = 0.1  # (%)
         self.turbulence_length_scale = 0.1  # (-)
 
