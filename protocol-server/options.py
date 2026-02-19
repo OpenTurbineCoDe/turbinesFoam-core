@@ -83,7 +83,7 @@ class controlDict:
 
         # Set the time step based on the number of degrees per time step
         omega_deg = np.degrees(omega)  # Convert to degrees per second
-        self.delta_t = 1 / omega_deg * time_step  # Time step for requested degree of rotation
+        self.delta_t = 0.00001  # Time step for requested degree of rotation
 
 
 class elementData:
@@ -199,12 +199,12 @@ class elementData:
 
 class BlockMesh:
     def __init__(self, model: TurbineModel, run_options: dict):
-        diameter = 1.5 * model.blade.radius
-        hub_domain = 1.5 * diameter
+        diameter = 2.0 * model.blade.radius
+        hub_domain = 1.0 * diameter
 
-        default_x_cells = 96
-        default_y_cells = 32
-        default_z_cells = 24
+        default_x_cells = 52
+        default_y_cells = 9
+        default_z_cells = 9
 
         cell_scaling_factor = 1
 
@@ -212,7 +212,7 @@ class BlockMesh:
         self.y_cells = int(default_y_cells * cell_scaling_factor)
         self.z_cells = int(default_z_cells * cell_scaling_factor)
 
-        self.x_downstream = 4 * diameter
+        self.x_downstream = 10 * diameter
         self.x_upstream = -2 * diameter
         self.z_up = hub_domain
         self.z_down = -hub_domain
@@ -240,7 +240,7 @@ class fvOptions:
         # Header for axialFlowTurbineAlSourceCoeffs
         self.origin = [0, 0, 0]
         self.axis = [
-            float(np.cos(np.radians(run_options.tilt_angle))),
+            -1 * float(np.cos(np.radians(run_options.tilt_angle))),
             0,
             float(np.sin(np.radians(run_options.tilt_angle))),
         ]
@@ -455,7 +455,7 @@ class HexMeshDict:
         # == 3. REFINEMENT REGIONS (Using Dataclasses) ==
         # ===================================================================
 
-        HIGH_RES = False
+        HIGH_RES = True
 
         CORE_REFINEMENT_LEVEL = 4 if HIGH_RES else 3  # Default 4
         UPSTREAM_REFINEMENT_LEVEL = 2 if HIGH_RES else 1  # Default 2

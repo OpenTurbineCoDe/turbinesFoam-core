@@ -424,7 +424,8 @@ def _do_terminate(sid: str, op_seq: int):
                 sess.proc.wait(timeout=10)
             except Exception:
                 sess.proc.kill()
-        shutil.rmtree(sess.case_dir, ignore_errors=True)
+        # TODO Fix to remove tree after running.
+        # shutil.rmtree(sess.case_dir, ignore_errors=True)
     finally:
         SESS.pop(sid, None)
 
