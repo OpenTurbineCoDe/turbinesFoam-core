@@ -398,7 +398,7 @@ FoamFile
                     blade_str += f"                    {profile}\n"
                 blade_str += "                );\n"
                 # Azimuthal offset for additional blade
-                if idx > 1:
+                if idx > 0:
                     blade_str += f"                azimuthalOffset {(idx - 1) * 120.0 + azimuthal_offset};\n"
                 # Always write reference to elementData file
                 blade_str += """                elementData
