@@ -383,7 +383,7 @@ FoamFile
     """
 
         def write_blades():
-            azimuthal_offset = 90
+            azimuthal_offset = 270
             blade_str = "    blades\n        {\n"
             for idx in range(1, self.fv_options.num_blades + 1):
                 blade_str += f"""            blade{idx}

@@ -240,7 +240,7 @@ class fvOptions:
         # Header for axialFlowTurbineAlSourceCoeffs
         self.origin = [0, 0, 0]
         self.axis = [
-            -1 * float(np.cos(np.radians(run_options.tilt_angle))),
+            float(np.cos(np.radians(run_options.tilt_angle))),
             0,
             float(np.sin(np.radians(run_options.tilt_angle))),
         ]

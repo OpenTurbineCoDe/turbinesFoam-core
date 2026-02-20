@@ -197,7 +197,7 @@ def aggregate_loads_from_csv(case_dir: Path, target_time: float) -> pd.DataFrame
                         "node": node_num,
                         "time": float(row["time"]),
                         "fx": float(row["fx"]),
-                        "fy": float(row["fy"]),
+                        "fy": -1 * float(row["fy"]),
                         "fz": float(row["fz"]),
                     }
                 )
