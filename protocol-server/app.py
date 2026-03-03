@@ -142,7 +142,7 @@ class RunOptions:
         self.tip_speed_ratio = 8
         self.wind_speed = 12.8
         self.twist_offset = 0.0
-        self.tilt_angle = -6.0
+        self.tilt_angle = -6
 
 
 # ---------------------------
@@ -197,7 +197,7 @@ def aggregate_loads_from_csv(case_dir: Path, target_time: float) -> pd.DataFrame
                         "node": node_num,
                         "time": float(row["time"]),
                         "fx": float(row["fx"]),
-                        "fy": -1 * float(row["fy"]),
+                        "fy": float(row["fy"]),
                         "fz": float(row["fz"]),
                     }
                 )
@@ -209,6 +209,64 @@ def aggregate_loads_from_csv(case_dir: Path, target_time: float) -> pd.DataFrame
         return pd.DataFrame(debug_rows)
     else:
         return pd.DataFrame(columns=["blade", "node", "time", "fx", "fy", "fz"])
+
+
+def aggregate_positions_from_csv(case_dir: Path, target_time: float) -> pd.DataFrame:
+    POS_DIR = case_dir / "postProcessing" / "actuatorLineElements" / "0"
+
+    if not POS_DIR.exists():
+        print(f"ERROR: Positions directory not found at {POS_DIR}", flush=True)
+        return pd.DataFrame()
+
+    file_pattern = str(POS_DIR / "turbine.blade*.element*.csv")
+    pos_files = sorted(glob.glob(file_pattern))
+
+    if not pos_files:
+        print(f"WARNING: No position CSV files found in {POS_DIR}", flush=True)
+        return pd.DataFrame()
+
+    debug_rows = []
+    TIME_COLUMN = "time"
+
+    for file_path in pos_files:
+        try:
+            # Parse filename for metadata
+            filename = os.path.basename(file_path)
+            # Expected format: turbine.blade1.element0.csv
+            blade_part = filename.split(".blade")[1].split(".element")[0]
+            node_part = filename.split(".element")[1].split(".csv")[0]
+
+            blade_num = int(blade_part)
+            node_num = int(node_part)
+
+            df = pd.read_csv(file_path)
+
+            # Find matching time row
+            time_match = df[
+                df[TIME_COLUMN].astype(float).ge(target_time - 1e-6)
+                & df[TIME_COLUMN].astype(float).le(target_time + 1e-6)
+            ]
+
+            if not time_match.empty:
+                row = time_match.iloc[0]
+                debug_rows.append(
+                    {
+                        "blade": blade_num,
+                        "node": node_num,
+                        "time": float(row["time"]),
+                        "x": float(row["x"]),
+                        "y": float(row["y"]),
+                        "z": float(row["z"]),
+                    }
+                )
+
+        except Exception as e:
+            print(f"Error processing CSV {file_path}: {e}", flush=True)
+
+    if debug_rows:
+        return pd.DataFrame(debug_rows)
+    else:
+        return pd.DataFrame(columns=["blade", "node", "time", "x", "y", "z"])
 
 
 def aggregate_performance_from_csv(case_dir: Path, target_time: float) -> List[float]:
@@ -444,6 +502,8 @@ def _open_perf_reader(case_dir: Path):
 
 def _perf_reader_task(sid: str):
     """Asynchronously monitors perf.pipe for solver signals (READY, STEPPED)."""
+    model = TurbineModel(name="IEA_15MW_AB_OF")
+
     sess = SESS.get(sid)
     if not sess:
         return
@@ -512,7 +572,9 @@ def _perf_reader_task(sid: str):
                     loads_df = aggregate_loads_from_csv(case_dir, current_t)
 
                     # 2. Pass DataFrame to Downsampler
-                    loads_flat_list = downsample_loads(loads_df, target_nodes_per_blade=TARGET_N)
+                    loads_flat_list = downsample_loads(
+                        loads_df, target_nodes_per_blade=TARGET_N, model=model
+                    )
 
                     # --- FIX: Retrieve dimensions from the Session object ---
                     N = sess.num_nodes_per_blade
@@ -535,6 +597,25 @@ def _perf_reader_task(sid: str):
                     print(f"WARNING: CSV reading failed: {e}", flush=True)
                     msg["meshFrcMom"] = []
 
+                # --------- POSITION AGGREGATION --------- #
+                try:
+                    positions_df = aggregate_positions_from_csv(case_dir, current_t)
+                    if not positions_df.empty:
+                        downsampled_positions = downsample_positions(
+                            positions_df, target_nodes_per_blade=TARGET_N, model=model
+                        )
+                        # Convert flat list to 2D structure
+                        reshaped_positions = [
+                            downsampled_positions[i : i + 3] for i in range(0, len(downsampled_positions), 3)
+                        ]
+                        msg["positions"] = reshaped_positions
+                    else:
+                        msg["positions"] = []
+                except Exception as e:
+                    print(f"WARNING: Positions CSV reading failed: {e}", flush=True)
+                    msg["positions"] = []
+
+                # --------- PERFORMANCE AGGREGATION --------- #
                 try:
                     blade_performance = aggregate_performance_from_csv(case_dir, current_t)
                     expected_performance_size = 3  # cp, ct, cq
@@ -609,15 +690,17 @@ def start_allrun(case_dir: Path) -> subprocess.Popen:
     )
 
 
-def resample_conserving_sum(source_forces: np.ndarray, n_target: int) -> np.ndarray:
+def resample_conserving_sum(source_forces: np.ndarray, n_target: int, model: TurbineModel) -> np.ndarray:
     """
     Resamples an array of forces from size N_source to N_target while:
-    1. Conserving the TOTAL sum of forces (Integral conservation).
-    2. Handling fractional overlaps (if a source node splits across target bins).
+    1. Conserving the TOTAL sum of forces across the active blade span.
+    2. Handling fractional overlaps based on the physical radial distance.
+    3. Truncating forces that fall inside the hub radius.
 
     Args:
         source_forces: Numpy array of shape (N_source, 3) [fx, fy, fz]
         n_target: Integer number of desired output nodes.
+        model: TurbineModel object containing the hub and blade radius.
 
     Returns:
         target_forces: Numpy array of shape (N_target, 3)
@@ -625,39 +708,46 @@ def resample_conserving_sum(source_forces: np.ndarray, n_target: int) -> np.ndar
     n_source = len(source_forces)
     target_forces = np.zeros((n_target, source_forces.shape[1]))
 
-    # Calculate the ratio of Source Nodes to Target Nodes
-    scale = n_source / n_target
+    R_tip = model.blade.radius
+    R_hub = model.hub.radius
+
+    # Assuming source bins are uniformly distributed from rotor center (0) to tip
+    dr_src = R_tip / n_source
+
+    # Target bins are uniformly distributed from hub radius to tip
+    dr_tgt = (R_tip - R_hub) / n_target
 
     for i in range(n_target):
-        # Define the continuous range (in source index units) that Target Node 'i' covers
-        s_start = i * scale
-        s_end = (i + 1) * scale
+        # Physical start and end of this target bin
+        r_start_tgt = R_hub + i * dr_tgt
+        r_end_tgt = R_hub + (i + 1) * dr_tgt
 
-        # Identify which integer Source indices overlap with this continuous range
-        idx_start = int(np.floor(s_start))
-        idx_end = int(np.ceil(s_end))
+        # Identify which source bins overlap with this target bin
+        idx_start = max(0, int(np.floor(r_start_tgt / dr_src)))
+        idx_end = min(n_source, int(np.ceil(r_end_tgt / dr_src)))
 
         for j in range(idx_start, idx_end):
-            # Boundary check
-            if j >= n_source:
-                continue
+            # Physical start and end of this source bin
+            r_start_src = j * dr_src
+            r_end_src = (j + 1) * dr_src
 
-            # Calculate the fractional overlap/weight
-            # Source Node 'j' conceptually covers the index range [j, j+1]
-            overlap_start = max(s_start, j)
-            overlap_end = min(s_end, j + 1)
-            weight = max(0.0, overlap_end - overlap_start)
+            # Calculate the physical overlapping length
+            overlap_start = max(r_start_tgt, r_start_src)
+            overlap_end = min(r_end_tgt, r_end_src)
+            overlap_length = max(0.0, overlap_end - overlap_start)
 
-            # Add the weighted portion of the source force to the target node
+            # The fraction of the source bin's force applied to this target bin
+            weight = overlap_length / dr_src
+
             target_forces[i] += source_forces[j] * weight
 
     return target_forces
 
 
-def downsample_loads(loads_df: pd.DataFrame, target_nodes_per_blade: int = 9) -> List[float]:
+def downsample_loads(loads_df: pd.DataFrame, target_nodes_per_blade: int, model: TurbineModel) -> List[float]:
     """
     Downsamples loads by SUMMING forces (conserving load) and handling
-    fractional node overlap.
+    fractional physical node overlap from the hub to the tip.
     """
     downsampled_flat_list = []
 
@@ -672,13 +762,11 @@ def downsample_loads(loads_df: pd.DataFrame, target_nodes_per_blade: int = 9) ->
 
         # Handle missing data or empty blade
         if len(raw_forces) == 0:
-            # Append zeros for this entire blade
             downsampled_flat_list.extend([0.0] * (target_nodes_per_blade * 6))
             continue
 
         # --- PERFORM CONSERVATIVE RESAMPLING ---
-        # This replaces simple binning/averaging
-        resampled_forces = resample_conserving_sum(raw_forces, target_nodes_per_blade)
+        resampled_forces = resample_conserving_sum(raw_forces, target_nodes_per_blade, model)
 
         # Flatten and add moments (0.0)
         for force_vec in resampled_forces:
@@ -690,6 +778,53 @@ def downsample_loads(loads_df: pd.DataFrame, target_nodes_per_blade: int = 9) ->
                     0.0,
                     0.0,
                     0.0,  # Moments
+                ]
+            )
+
+    return downsampled_flat_list
+
+
+def downsample_positions(positions_df: pd.DataFrame, target_nodes_per_blade: int, model: TurbineModel) -> List[float]:
+    """
+    Downsamples blade positions from the source resolution (e.g., 56) to the
+    target resolution using linear interpolation along the actual physical blade span.
+    """
+    downsampled_flat_list = []
+
+    # We explicitly loop over blades 1, 2, 3
+    for blade_idx in [1, 2, 3]:
+        # Extract positions for this blade, sorted by node
+        if not positions_df.empty:
+            blade_df = positions_df[positions_df["blade"] == blade_idx].sort_values("node")
+            raw_positions = blade_df[["x", "y", "z"]].values
+        else:
+            raw_positions = np.array([])
+
+        n_source = len(raw_positions)
+
+        # Handle missing data or empty blade
+        if n_source == 0:
+            downsampled_flat_list.extend([0.0] * (target_nodes_per_blade * 3))
+            continue
+
+        # --- PERFORM LINEAR INTERPOLATION ON PHYSICAL RADIUS ---
+        # Map source nodes across the entire rotor radius (0 to Tip)
+        s_source = np.linspace(0, model.blade.radius, n_source)
+        # Map target nodes strictly along the blade span (Hub to Tip)
+        s_target = np.linspace(model.hub.radius, model.blade.radius, target_nodes_per_blade)
+
+        # Interpolate each coordinate axis independently
+        target_x = np.interp(s_target, s_source, raw_positions[:, 0])
+        target_y = np.interp(s_target, s_source, raw_positions[:, 1])
+        target_z = np.interp(s_target, s_source, raw_positions[:, 2])
+
+        # Flatten and append to the final list
+        for i in range(target_nodes_per_blade):
+            downsampled_flat_list.extend(
+                [
+                    float(target_x[i]),  # X
+                    float(target_y[i]),  # Y
+                    float(target_z[i]),  # Z
                 ]
             )
 

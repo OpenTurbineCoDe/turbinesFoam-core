@@ -244,6 +244,7 @@ class fvOptions:
             0,
             float(np.sin(np.radians(run_options.tilt_angle))),
         ]
+
         self.vertical_direction = [0, 0, 1]
         self.free_stream_velocity = [model.fluid.velocity, 0, 0]
         self.tip_speed_ratio = run_options.tip_speed_ratio

@@ -254,7 +254,7 @@ class Rotor:
     def __init__(self):
         # Default rotor properties
         self.n_blades = 3
-        self.tilt_angle = 5  # (degrees)
+        self.tilt_angle = 0  # (degrees)
         self.blade_precone_angle = 2.5  # (degrees)
 
     def read_from_yaml(self, filename):
