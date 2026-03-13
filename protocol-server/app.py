@@ -28,6 +28,9 @@ from typing import Optional, Dict, Any, List
 
 app = FastAPI()
 
+DS_FROM_INPUTS = True
+Z_HUB = 0.0
+
 
 # In-memory session registry:
 class State(str, Enum):
@@ -54,6 +57,7 @@ class Session:
     num_blades: int = 0
     num_nodes_per_blade: int = 0
     tip_speed_ratio: float = 0.0
+    fmu_span_pct_template: Optional[np.ndarray] = None
 
 
 SESS: Dict[str, Session] = {}
@@ -434,6 +438,7 @@ def _do_step(sid: str, payload: StepIn, op_seq: int):
         if sess.step_fd is None:
             raise RuntimeError("Step FD was not initialized.")
 
+        sess.last_inputs = payload.inputs
         # 1. Write dt (Solver starts calculation)
         write_step_to_fd(sess.step_fd, payload.dt)
 
@@ -503,6 +508,7 @@ def _open_perf_reader(case_dir: Path):
 def _perf_reader_task(sid: str):
     """Asynchronously monitors perf.pipe for solver signals (READY, STEPPED)."""
     model = TurbineModel(name="IEA_15MW_AB_OF")
+    model.read_from_yaml()
 
     sess = SESS.get(sid)
     if not sess:
@@ -562,6 +568,14 @@ def _perf_reader_task(sid: str):
                 sess.t = current_t
                 TARGET_N = sess.num_nodes_per_blade
 
+                # --- 1. EXTRACT FMU RADIAL TEMPLATE (Once at the start) ---
+                if sess.fmu_span_pct_template is None and sess.last_inputs:
+                    # Get FMU global coords for the first blade nodes
+                    fmu_pos = np.array(sess.last_inputs.mesh.pos[:TARGET_N])
+                    # Calculate radius using the global Z_HUB (0.0)
+                    sess.fmu_span_pct_template = np.sqrt(fmu_pos[:, 1] ** 2 + (fmu_pos[:, 2] - Z_HUB) ** 2)
+                    print(f"INFO: Captured FMU template. R_min: {sess.fmu_span_pct_template.min():.2f}m")
+
                 # --- CRITICAL: BLOCK and read data from CSVs ---
                 try:
                     case_dir = Path(sess.case_dir)
@@ -572,7 +586,12 @@ def _perf_reader_task(sid: str):
                     loads_df = aggregate_loads_from_csv(case_dir, current_t)
 
                     # 2. Pass DataFrame to Downsampler
-                    loads_flat_list = downsample_loads(loads_df, target_nodes_per_blade=TARGET_N, model=model)
+                    loads_flat_list = downsample_loads(
+                        loads_df,
+                        target_nodes_per_blade=TARGET_N,
+                        model=model,
+                        fmu_radial_list=sess.fmu_span_pct_template,
+                    )
 
                     # --- FIX: Retrieve dimensions from the Session object ---
                     N = sess.num_nodes_per_blade
@@ -688,102 +707,90 @@ def start_allrun(case_dir: Path) -> subprocess.Popen:
     )
 
 
-def resample_conserving_sum(source_forces: np.ndarray, n_target: int, model: TurbineModel) -> np.ndarray:
-    """
-    Resamples forces while conserving both the Total Sum (Thrust) and
-    the Integrated Moment (Torque) by adjusting for radial arm differences.
-    """
+def resample_conserving_sum(
+    source_forces: np.ndarray, n_target: int, model: TurbineModel, radial_list: np.ndarray
+) -> np.ndarray:
     n_source = len(source_forces)
-    target_forces = np.zeros((n_target, source_forces.shape[1]))
+    target_forces = np.zeros((n_target, 3))
 
     R_tip = model.blade.radius
-    R_hub = 6 * model.hub.radius
+    R_hub = model.hub.radius  # Ensure this is 5.54 in YAML
 
-    # Source bin width (from 0 to R_tip)
-    dr_src = R_tip / n_source
-    # Target bin width (from R_hub to R_tip)
-    dr_tgt = (R_tip - R_hub) / n_target
+    # OpenFOAM elements cover the span from Hub to Tip
+    dr_src = (R_tip - R_hub) / n_source
+
+    # 1. Define target bin boundaries
+    edges = np.zeros(n_target + 1)
+    if n_target > 1:
+        edges[1:-1] = (radial_list[:-1] + radial_list[1:]) / 2
+        edges[0] = max(R_hub, radial_list[0] - (edges[1] - radial_list[0]))
+        edges[-1] = R_tip
+    else:
+        edges = np.array([R_hub, R_tip])
 
     for i in range(n_target):
-        # Target radial center (The moment arm for the FMU node)
-        r_target_node = R_hub + (i + 0.5) * dr_tgt
+        r_target_node = radial_list[i]
+        r_start_tgt = edges[i]
+        r_end_tgt = edges[i + 1]
 
-        # Physical bounds of the target bin
-        r_start_tgt = R_hub + i * dr_tgt
-        r_end_tgt = R_hub + (i + 1) * dr_tgt
-
-        # Source bins that overlap with this target bin
-        idx_start = max(0, int(np.floor(r_start_tgt / dr_src)))
-        idx_end = min(n_source, int(np.ceil(r_end_tgt / dr_src)))
+        # 2. Find overlapping source bins (OpenFOAM cells)
+        # Shift radii by R_hub to get the correct array index
+        idx_start = max(0, int(np.floor((r_start_tgt - R_hub) / dr_src)))
+        idx_end = min(n_source, int(np.ceil((r_end_tgt - R_hub) / dr_src)))
 
         for j in range(idx_start, idx_end):
-            # Source radial center
-            r_source_bin = (j + 0.5) * dr_src
+            # Source center relative to hub
+            r_source_bin = R_hub + (j + 0.5) * dr_src
 
-            # Physical bounds of the source bin
-            r_start_src = j * dr_src
-            r_end_src = (j + 1) * dr_src
+            r_start_src = R_hub + j * dr_src
+            r_end_src = R_hub + (j + 1) * dr_src
 
-            # Overlap length
-            overlap_start = max(r_start_tgt, r_start_src)
-            overlap_end = min(r_end_tgt, r_end_src)
-            overlap_length = max(0.0, overlap_end - overlap_start)
+            overlap = max(0.0, min(r_end_tgt, r_end_src) - max(r_start_tgt, r_start_src))
+            if overlap <= 0:
+                continue
 
-            # 1. Calculate the portion of force belonging to this overlap
-            weight = overlap_length / dr_src
-            force_portion = source_forces[j] * weight
-
-            # 2. Conserve Moment for Tangential Components (Fy, Fz)
-            # Torque_source = force_portion * r_source_bin
-            # Force_target = Torque_source / r_target_node
-            # This ensures that the work done by the blade remains identical.
-
+            weight = overlap / dr_src
             torque_scaling = r_source_bin / r_target_node
 
-            # Apply scaling to Fy and Fz (typically the torque-producing axes)
-            # Fx (Thrust) is generally conserved by pure sum, but for high-fidelity
-            # we scale all axes to ensure the point-load representation is equivalent.
-            target_forces[i] += force_portion * torque_scaling
+            # Apply to Fx, Fy, Fz
+            target_forces[i] += source_forces[j] * weight * torque_scaling
 
     return target_forces
 
 
-def downsample_loads(loads_df: pd.DataFrame, target_nodes_per_blade: int, model: TurbineModel) -> List[float]:
+def downsample_loads(
+    loads_df: pd.DataFrame,
+    target_nodes_per_blade: int,
+    model: TurbineModel,
+    fmu_radial_list: Optional[np.ndarray] = None,
+) -> List[float]:
     """
-    Downsamples loads by SUMMING forces (conserving load) and handling
-    fractional physical node overlap from the hub to the tip.
+    Downsamples loads by SUMMING forces (conserving load/torque).
     """
     downsampled_flat_list = []
 
-    # We explicitly loop over blades 1, 2, 3
+    # 1. Determine the radial distribution to use
+    if DS_FROM_INPUTS and fmu_radial_list is not None:
+        radial_distribution = fmu_radial_list
+    else:
+        # Default distribution: Hub (5.54m) to Tip
+        R_hub = model.hub.radius
+        R_tip = model.blade.radius
+        radial_distribution = np.linspace(R_hub, R_tip, target_nodes_per_blade)
+
+    # 2. Loop over blades 1, 2, 3
     for blade_idx in [1, 2, 3]:
-        # Extract forces for this blade, sorted by node
         if not loads_df.empty:
             blade_df = loads_df[loads_df["blade"] == blade_idx].sort_values("node")
             raw_forces = blade_df[["fx", "fy", "fz"]].values
+
+            resampled_forces = resample_conserving_sum(raw_forces, target_nodes_per_blade, model, radial_distribution)
         else:
-            raw_forces = np.array([])
+            resampled_forces = np.zeros((target_nodes_per_blade, 3))
 
-        # Handle missing data or empty blade
-        if len(raw_forces) == 0:
-            downsampled_flat_list.extend([0.0] * (target_nodes_per_blade * 6))
-            continue
-
-        # --- PERFORM CONSERVATIVE RESAMPLING ---
-        resampled_forces = resample_conserving_sum(raw_forces, target_nodes_per_blade, model)
-
-        # Flatten and add moments (0.0)
+        # 3. Explicitly loop and cast to float to prevent FMU TypeErrors
         for force_vec in resampled_forces:
-            downsampled_flat_list.extend(
-                [
-                    float(force_vec[0]),  # Fx
-                    float(force_vec[1]),  # Fy
-                    float(force_vec[2]),  # Fz
-                    0.0,
-                    0.0,
-                    0.0,  # Moments
-                ]
-            )
+            downsampled_flat_list.extend([float(force_vec[0]), float(force_vec[1]), float(force_vec[2]), 0.0, 0.0, 0.0])
 
     return downsampled_flat_list
 
