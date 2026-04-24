@@ -29,6 +29,7 @@ from typing import Optional, Dict, Any, List
 app = FastAPI()
 
 DS_FROM_INPUTS = True
+DENSITY = 1.225
 Z_HUB = 0.0
 
 
@@ -200,9 +201,9 @@ def aggregate_loads_from_csv(case_dir: Path, target_time: float) -> pd.DataFrame
                         "blade": blade_num,
                         "node": node_num,
                         "time": float(row["time"]),
-                        "fx": float(row["fx"]),
-                        "fy": float(row["fy"]),
-                        "fz": float(row["fz"]),
+                        "fx": DENSITY * float(row["fx"]),
+                        "fy": DENSITY * float(row["fy"]),
+                        "fz": DENSITY * float(row["fz"]),
                     }
                 )
 
@@ -575,6 +576,24 @@ def _perf_reader_task(sid: str):
                     # Calculate radius using the global Z_HUB (0.0)
                     sess.fmu_span_pct_template = np.sqrt(fmu_pos[:, 1] ** 2 + (fmu_pos[:, 2] - Z_HUB) ** 2)
                     print(f"INFO: Captured FMU template. R_min: {sess.fmu_span_pct_template.min():.2f}m")
+                # --------- POSITION AGGREGATION --------- #
+                try:
+                    positions_df = aggregate_positions_from_csv(case_dir, current_t)
+                    if not positions_df.empty:
+                        if sess.last_inputs:  # Make sure inputs exist before processing
+                            downsampled_positions = downsample_positions(
+                                positions_df, target_nodes_per_blade=TARGET_N, model=model, fmu_inputs=sess.last_inputs
+                            )
+                        # Convert flat list to 2D structure
+                        reshaped_positions = [
+                            downsampled_positions[i : i + 3] for i in range(0, len(downsampled_positions), 3)
+                        ]
+                        msg["positions"] = reshaped_positions
+                    else:
+                        msg["positions"] = []
+                except Exception as e:
+                    print(f"WARNING: Positions CSV reading failed: {e}", flush=True)
+                    msg["positions"] = []
 
                 # --- CRITICAL: BLOCK and read data from CSVs ---
                 try:
@@ -586,12 +605,14 @@ def _perf_reader_task(sid: str):
                     loads_df = aggregate_loads_from_csv(case_dir, current_t)
 
                     # 2. Pass DataFrame to Downsampler
-                    loads_flat_list = downsample_loads(
-                        loads_df,
-                        target_nodes_per_blade=TARGET_N,
-                        model=model,
-                        fmu_radial_list=sess.fmu_span_pct_template,
-                    )
+                    if sess.last_inputs:
+                        loads_flat_list = downsample_loads(
+                            loads_df,
+                            positions_df,
+                            target_nodes_per_blade=TARGET_N,
+                            model=model,
+                            fmu_inputs=sess.last_inputs,
+                        )
 
                     # --- FIX: Retrieve dimensions from the Session object ---
                     N = sess.num_nodes_per_blade
@@ -613,24 +634,6 @@ def _perf_reader_task(sid: str):
                 except Exception as e:
                     print(f"WARNING: CSV reading failed: {e}", flush=True)
                     msg["meshFrcMom"] = []
-
-                # --------- POSITION AGGREGATION --------- #
-                try:
-                    positions_df = aggregate_positions_from_csv(case_dir, current_t)
-                    if not positions_df.empty:
-                        downsampled_positions = downsample_positions(
-                            positions_df, target_nodes_per_blade=TARGET_N, model=model
-                        )
-                        # Convert flat list to 2D structure
-                        reshaped_positions = [
-                            downsampled_positions[i : i + 3] for i in range(0, len(downsampled_positions), 3)
-                        ]
-                        msg["positions"] = reshaped_positions
-                    else:
-                        msg["positions"] = []
-                except Exception as e:
-                    print(f"WARNING: Positions CSV reading failed: {e}", flush=True)
-                    msg["positions"] = []
 
                 # --------- PERFORMANCE AGGREGATION --------- #
                 try:
@@ -708,135 +711,121 @@ def start_allrun(case_dir: Path) -> subprocess.Popen:
 
 
 def resample_conserving_sum(
-    source_forces: np.ndarray, n_target: int, model: TurbineModel, radial_list: np.ndarray
+    source_forces: np.ndarray,
+    source_radii: np.ndarray,
+    n_target: int,
+    target_radii: np.ndarray,
+    min_radius: float = 0.0,  # Added parameter
 ) -> np.ndarray:
-    n_source = len(source_forces)
+    """
+    Interpolates forces across gaps.
+    Conserves the total integrated load by scaling the result based on
+    data points above the min_radius.
+    """
     target_forces = np.zeros((n_target, 3))
 
-    R_tip = model.blade.radius
-    R_hub = model.hub.radius  # Ensure this is 5.54 in YAML
+    # 1. Sort source data (Required for np.interp)
+    sort_idx = np.argsort(source_radii)
+    src_r_sorted = source_radii[sort_idx]
+    src_f_sorted = source_forces[sort_idx]
 
-    # OpenFOAM elements cover the span from Hub to Tip
-    dr_src = (R_tip - R_hub) / n_source
+    for i in range(3):
+        # 2. Map forces onto target radii using full source range
+        target_forces[:, i] = np.interp(target_radii, src_r_sorted, src_f_sorted[:, i])
 
-    # 1. Define target bin boundaries
-    edges = np.zeros(n_target + 1)
-    if n_target > 1:
-        edges[1:-1] = (radial_list[:-1] + radial_list[1:]) / 2
-        edges[0] = max(R_hub, radial_list[0] - (edges[1] - radial_list[0]))
-        edges[-1] = R_tip
-    else:
-        edges = np.array([R_hub, R_tip])
+        # 3. Calculate sums for conservation, EXCLUDING values below min_radius
+        # Source mask
+        src_mask = src_r_sorted >= min_radius
+        source_sum_filtered = np.sum(src_f_sorted[src_mask, i])
 
-    for i in range(n_target):
-        r_target_node = radial_list[i]
-        r_start_tgt = edges[i]
-        r_end_tgt = edges[i + 1]
+        # Target mask
+        tgt_mask = target_radii >= min_radius
+        target_sum_filtered = np.sum(target_forces[tgt_mask, i])
 
-        # 2. Find overlapping source bins (OpenFOAM cells)
-        # Shift radii by R_hub to get the correct array index
-        idx_start = max(0, int(np.floor((r_start_tgt - R_hub) / dr_src)))
-        idx_end = min(n_source, int(np.ceil((r_end_tgt - R_hub) / dr_src)))
-
-        for j in range(idx_start, idx_end):
-            # Source center relative to hub
-            r_source_bin = R_hub + (j + 0.5) * dr_src
-
-            r_start_src = R_hub + j * dr_src
-            r_end_src = R_hub + (j + 1) * dr_src
-
-            overlap = max(0.0, min(r_end_tgt, r_end_src) - max(r_start_tgt, r_start_src))
-            if overlap <= 0:
-                continue
-
-            weight = overlap / dr_src
-            torque_scaling = r_source_bin / r_target_node
-
-            # Apply to Fx, Fy, Fz
-            target_forces[i] += source_forces[j] * weight * torque_scaling
+        # 4. Apply scaling to the whole blade based on the filtered ratio
+        if abs(target_sum_filtered) > 1e-8 and abs(source_sum_filtered) > 1e-8:
+            ratio = source_sum_filtered / target_sum_filtered
+            target_forces[:, i] *= ratio
 
     return target_forces
 
 
 def downsample_loads(
     loads_df: pd.DataFrame,
+    positions_df: pd.DataFrame,
     target_nodes_per_blade: int,
     model: TurbineModel,
-    fmu_radial_list: Optional[np.ndarray] = None,
+    fmu_inputs: StepInputs,
 ) -> List[float]:
-    """
-    Downsamples loads by SUMMING forces (conserving load/torque).
-    """
     downsampled_flat_list = []
+    B = fmu_inputs.meta.num_blades
+    N = fmu_inputs.meta.num_nodes_per_blade
 
-    # 1. Determine the radial distribution to use
-    if DS_FROM_INPUTS and fmu_radial_list is not None:
-        radial_distribution = fmu_radial_list
-    else:
-        # Default distribution: Hub (5.54m) to Tip
-        R_hub = model.hub.radius
-        R_tip = model.blade.radius
-        radial_distribution = np.linspace(R_hub, R_tip, target_nodes_per_blade)
+    # Establish the local coordinate origins to ignore global offsets (e.g., Z_HEIGHT)
+    fmu_hub_pos = np.array(fmu_inputs.hub.pos)
+    foam_hub_pos = np.array([0.0, 0.0, 0.0])  # fvOptions sets origin to [0,0,0]
 
-    # 2. Loop over blades 1, 2, 3
-    for blade_idx in [1, 2, 3]:
-        if not loads_df.empty:
-            blade_df = loads_df[loads_df["blade"] == blade_idx].sort_values("node")
-            raw_forces = blade_df[["fx", "fy", "fz"]].values
+    for blade_idx in range(1, B + 1):
+        b_loads = loads_df[loads_df["blade"] == blade_idx].sort_values("node")
+        b_pos = positions_df[positions_df["blade"] == blade_idx].sort_values("node")
 
-            resampled_forces = resample_conserving_sum(raw_forces, target_nodes_per_blade, model, radial_distribution)
+        if not b_loads.empty and not b_pos.empty:
+            raw_forces = b_loads[["fx", "fy", "fz"]].values
+            src_pos = b_pos[["x", "y", "z"]].values
+
+            # Get exact requested 3D target positions for this specific blade
+            tgt_pos = np.array(fmu_inputs.mesh.pos[(blade_idx - 1) * N : blade_idx * N])
+
+            # Map both to a 1D spanwise radial distance relative to their respective hubs
+            source_r = np.linalg.norm(src_pos - foam_hub_pos, axis=1)
+            target_r = np.linalg.norm(tgt_pos - fmu_hub_pos, axis=1)
+
+            resampled = resample_conserving_sum(raw_forces, source_r, N, target_r, min_radius=model.hub.radius)
         else:
-            resampled_forces = np.zeros((target_nodes_per_blade, 3))
+            resampled = np.zeros((N, 3))
 
-        # 3. Explicitly loop and cast to float to prevent FMU TypeErrors
-        for force_vec in resampled_forces:
-            downsampled_flat_list.extend([float(force_vec[0]), float(force_vec[1]), float(force_vec[2]), 0.0, 0.0, 0.0])
+        for vec in resampled:
+            downsampled_flat_list.extend([float(vec[0]), float(vec[1]), float(vec[2]), 0.0, 0.0, 0.0])
 
     return downsampled_flat_list
 
 
-def downsample_positions(positions_df: pd.DataFrame, target_nodes_per_blade: int, model: TurbineModel) -> List[float]:
+def downsample_positions(
+    positions_df: pd.DataFrame, target_nodes_per_blade: int, model: TurbineModel, fmu_inputs: StepInputs
+) -> List[float]:
     """
-    Downsamples blade positions from the source resolution (e.g., 56) to the
-    target resolution using linear interpolation along the actual physical blade span.
+    Interpolates OpenFOAM's mesh positions onto the FMU's target radii.
     """
     downsampled_flat_list = []
+    B = fmu_inputs.meta.num_blades
+    N = fmu_inputs.meta.num_nodes_per_blade
 
-    # We explicitly loop over blades 1, 2, 3
-    for blade_idx in [1, 2, 3]:
-        # Extract positions for this blade, sorted by node
-        if not positions_df.empty:
-            blade_df = positions_df[positions_df["blade"] == blade_idx].sort_values("node")
-            raw_positions = blade_df[["x", "y", "z"]].values
-        else:
-            raw_positions = np.array([])
+    fmu_hub_pos = np.array(fmu_inputs.hub.pos)
+    foam_hub_pos = np.array([0.0, 0.0, 0.0])
 
-        n_source = len(raw_positions)
-
-        # Handle missing data or empty blade
-        if n_source == 0:
-            downsampled_flat_list.extend([0.0] * (target_nodes_per_blade * 3))
+    for blade_idx in range(1, B + 1):
+        b_df = positions_df[positions_df["blade"] == blade_idx].sort_values("node")
+        if b_df.empty:
+            downsampled_flat_list.extend([0.0] * (N * 3))
             continue
 
-        # --- PERFORM LINEAR INTERPOLATION ON PHYSICAL RADIUS ---
-        # Map source nodes across the entire rotor radius (0 to Tip)
-        s_source = np.linspace(0, model.blade.radius, n_source)
-        # Map target nodes strictly along the blade span (Hub to Tip)
-        s_target = np.linspace(model.hub.radius, model.blade.radius, target_nodes_per_blade)
+        raw_pos = b_df[["x", "y", "z"]].values
+        tgt_pos = np.array(fmu_inputs.mesh.pos[(blade_idx - 1) * N : blade_idx * N])
 
-        # Interpolate each coordinate axis independently
-        target_x = np.interp(s_target, s_source, raw_positions[:, 0])
-        target_y = np.interp(s_target, s_source, raw_positions[:, 1])
-        target_z = np.interp(s_target, s_source, raw_positions[:, 2])
+        # Map both to a 1D spanwise radial distance relative to their respective hubs
+        source_r = np.linalg.norm(raw_pos - foam_hub_pos, axis=1)
+        target_r = np.linalg.norm(tgt_pos - fmu_hub_pos, axis=1)
 
-        # Flatten and append to the final list
-        for i in range(target_nodes_per_blade):
-            downsampled_flat_list.extend(
-                [
-                    float(target_x[i]),  # X
-                    float(target_y[i]),  # Y
-                    float(target_z[i]),  # Z
-                ]
-            )
+        # Sort for np.interp
+        sort_idx = np.argsort(source_r)
+        src_r_sorted = source_r[sort_idx]
+        raw_pos_sorted = raw_pos[sort_idx]
+
+        target_x = np.interp(target_r, src_r_sorted, raw_pos_sorted[:, 0])
+        target_y = np.interp(target_r, src_r_sorted, raw_pos_sorted[:, 1])
+        target_z = np.interp(target_r, src_r_sorted, raw_pos_sorted[:, 2])
+
+        for i in range(N):
+            downsampled_flat_list.extend([float(target_x[i]), float(target_y[i]), float(target_z[i])])
 
     return downsampled_flat_list
