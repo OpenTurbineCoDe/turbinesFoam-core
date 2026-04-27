@@ -33,7 +33,7 @@ blade:
   profiles:
   - Cylinder
   - SD7032
-  radius: 121.44
+  radius: 121.13
   rotor_speed: 0
   tip_speed_ratio: 9
 environment:

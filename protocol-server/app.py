@@ -142,7 +142,7 @@ class RunOptions:
         self.tip_speed_ratio = 8
         self.wind_speed = 12.8
         self.twist_offset = 0.0
-        self.tilt_angle = 0
+        self.tilt_angle = -6.0
 
 
 # ---------------------------
@@ -382,27 +382,32 @@ def verify_performance_tolerances(
     ana_torque = cq * q_dyn * sess.r_tip
     ana_power = cp * q_dyn_power
 
-    # 2. Raw Integrated (df_loads already physically scaled inside the step event)
+    # 2. Raw Integrated
     if not df_loads.empty and not df_pos.empty:
         df_raw = pd.merge(df_loads, df_pos, on=["blade", "node"])
         raw_thrust = df_raw["fx"].sum()
 
-        # Full 3D Moment (M = r x F) using pure global coordinates
-        Mx = df_raw["y"] * df_raw["fz"] - df_raw["z"] * df_raw["fy"]
-        My = df_raw["z"] * df_raw["fx"] - df_raw["x"] * df_raw["fz"]
-        Mz = df_raw["x"] * df_raw["fy"] - df_raw["y"] * df_raw["fx"]
+        hub_x = df_raw[df_raw["node"] == 0]["x"].mean()
+        hub_y = df_raw[df_raw["node"] == 0]["y"].mean()
+        hub_z = df_raw[df_raw["node"] == 0]["z"].mean()
+
+        dx = df_raw["x"] - hub_x
+        dy = df_raw["y"] - hub_y
+        dz = df_raw["z"] - hub_z
+
+        Mx = dy * df_raw["fz"] - dz * df_raw["fy"]
+        My = dz * df_raw["fx"] - dx * df_raw["fz"]
+        Mz = dx * df_raw["fy"] - dy * df_raw["fx"]
 
         Total_Mx = Mx.sum()
         Total_My = My.sum()
         Total_Mz = Mz.sum()
 
-        # Pure dot product with the rotation axis vector extracted from fvOptions
         raw_torque = (Total_Mx * sess.ax_x) + (Total_My * sess.ax_y) + (Total_Mz * sess.ax_z)
-
-        # Power correctly preserves the sign of the torque
         raw_power = raw_torque * omega
     else:
         raw_thrust = raw_torque = raw_power = 0.0
+        hub_x = hub_y = hub_z = 0.0
 
     # 3. Downsampled Integrated
     ds_thrust = ds_torque_x = ds_torque_y = ds_torque_z = 0.0
@@ -411,7 +416,6 @@ def verify_performance_tolerances(
     if len(downsampled_forces_flat) == num_nodes_total * 6:
         N = sess.num_nodes_per_blade
 
-        # Determine the true hub origin by averaging the root nodes of all 3 blades
         if num_nodes_total >= 3 * N:
             t_hub_x = (target_pos[0][0] + target_pos[N][0] + target_pos[2 * N][0]) / 3.0
             t_hub_y = (target_pos[0][1] + target_pos[N][1] + target_pos[2 * N][1]) / 3.0
@@ -420,7 +424,6 @@ def verify_performance_tolerances(
             t_hub_x = t_hub_y = t_hub_z = 0.0
 
         for i in range(num_nodes_total):
-            # Calculate lever arm relative to the calculated downsampled hub
             x = target_pos[i][0] - t_hub_x
             y = target_pos[i][1] - t_hub_y
             z = target_pos[i][2] - t_hub_z
@@ -434,11 +437,35 @@ def verify_performance_tolerances(
             ds_torque_y += z * fx - x * fz
             ds_torque_z += x * fy - y * fx
 
-        # Same pure dot product for Downsampled data
         ds_torque = (ds_torque_x * sess.ax_x) + (ds_torque_y * sess.ax_y) + (ds_torque_z * sess.ax_z)
         ds_power = ds_torque * omega
     else:
         ds_torque = ds_power = 0.0
+        t_hub_x = t_hub_y = t_hub_z = 0.0
+
+    # --- 4. RAY ERROR (GEOMETRIC PHASE) CALCULATION ---
+    ray_error_deg = 0.0
+    if not df_pos.empty and num_nodes_total >= sess.num_nodes_per_blade:
+        # Vector 1: OpenFOAM Blade 1 Tip
+        b1_of = df_raw[df_raw["blade"] == 1].sort_values("node")
+        if not b1_of.empty:
+            of_tip = b1_of.iloc[-1]
+            v_of = np.array([of_tip["x"] - hub_x, of_tip["y"] - hub_y, of_tip["z"] - hub_z])
+            v_of_norm = np.linalg.norm(v_of)
+            if v_of_norm > 1e-6:
+                v_of = v_of / v_of_norm
+
+            # Vector 2: FMU Blade 1 Tip
+            N = sess.num_nodes_per_blade
+            fmu_tip = target_pos[N - 1]
+            v_fmu = np.array([fmu_tip[0] - t_hub_x, fmu_tip[1] - t_hub_y, fmu_tip[2] - t_hub_z])
+            v_fmu_norm = np.linalg.norm(v_fmu)
+            if v_fmu_norm > 1e-6:
+                v_fmu = v_fmu / v_fmu_norm
+
+            # 3D Angle Calculation
+            dot_prod = np.clip(np.dot(v_of, v_fmu), -1.0, 1.0)
+            ray_error_deg = np.degrees(np.arccos(dot_prod))
 
     # Print Report
     print(f"\n--- Load Verification at t={current_t:.3f} ---")
@@ -464,6 +491,9 @@ def verify_performance_tolerances(
         print(
             f"{name:<15} | {ana:<12.3f} | {raw:<12.3f} | {ds:<12.3f} | {err_raw:<6.2f}%{flag_raw} | {err_ds:<6.2f}%{flag_ds}"
         )
+
+    print("-" * 80)
+    print(f"Blade 1 Ray Error (3D Misalignment): {ray_error_deg:.2f} deg")
     print("-" * 80, flush=True)
 
 
