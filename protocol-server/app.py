@@ -443,29 +443,45 @@ def verify_performance_tolerances(
         ds_torque = ds_power = 0.0
         t_hub_x = t_hub_y = t_hub_z = 0.0
 
-    # --- 4. RAY ERROR (GEOMETRIC PHASE) CALCULATION ---
+    # --- 4. DECOMPOSED RAY ERROR CALCULATION ---
     ray_error_deg = 0.0
+    decomposed_errors = {"azimuth": 0.0, "tilt": 0.0, "yaw": 0.0}
+
     if not df_pos.empty and num_nodes_total >= sess.num_nodes_per_blade:
-        # Vector 1: OpenFOAM Blade 1 Tip
+        # Vector 1: OpenFOAM Blade 1 Tip (relative to OpenFOAM Hub)
         b1_of = df_raw[df_raw["blade"] == 1].sort_values("node")
         if not b1_of.empty:
             of_tip = b1_of.iloc[-1]
             v_of = np.array([of_tip["x"] - hub_x, of_tip["y"] - hub_y, of_tip["z"] - hub_z])
             v_of_norm = np.linalg.norm(v_of)
-            if v_of_norm > 1e-6:
-                v_of = v_of / v_of_norm
 
-            # Vector 2: FMU Blade 1 Tip
+            # Vector 2: FMU Blade 1 Tip (relative to FMU Hub)
             N = sess.num_nodes_per_blade
             fmu_tip = target_pos[N - 1]
             v_fmu = np.array([fmu_tip[0] - t_hub_x, fmu_tip[1] - t_hub_y, fmu_tip[2] - t_hub_z])
             v_fmu_norm = np.linalg.norm(v_fmu)
-            if v_fmu_norm > 1e-6:
-                v_fmu = v_fmu / v_fmu_norm
 
-            # 3D Angle Calculation
-            dot_prod = np.clip(np.dot(v_of, v_fmu), -1.0, 1.0)
-            ray_error_deg = np.degrees(np.arccos(dot_prod))
+            if v_of_norm > 1e-6 and v_fmu_norm > 1e-6:
+                # Total 3D Angle Calculation
+                v_of_u = v_of / v_of_norm
+                v_fmu_u = v_fmu / v_fmu_norm
+                dot_prod = np.clip(np.dot(v_of_u, v_fmu_u), -1.0, 1.0)
+                ray_error_deg = np.degrees(np.arccos(dot_prod))
+
+                # A. Azimuthal Error (YZ Plane) - Pure rotation around the axial X-axis
+                ang_of_yz = np.degrees(np.arctan2(v_of[1], v_of[2]))
+                ang_fmu_yz = np.degrees(np.arctan2(v_fmu[1], v_fmu[2]))
+                decomposed_errors["azimuth"] = ang_fmu_yz - ang_of_yz
+
+                # B. Tilt Error (XZ Plane) - Vertical inclination
+                ang_of_xz = np.degrees(np.arctan2(v_of[0], v_of[2]))
+                ang_fmu_xz = np.degrees(np.arctan2(v_fmu[0], v_fmu[2]))
+                decomposed_errors["tilt"] = ang_fmu_xz - ang_of_xz
+
+                # C. Yaw/Lateral Error (XY Plane)
+                ang_of_xy = np.degrees(np.arctan2(v_of[0], v_of[1]))
+                ang_fmu_xy = np.degrees(np.arctan2(v_fmu[0], v_fmu[1]))
+                decomposed_errors["yaw"] = ang_fmu_xy - ang_of_xy
 
     # Print Report
     print(f"\n--- Load Verification at t={current_t:.3f} ---")
@@ -493,7 +509,11 @@ def verify_performance_tolerances(
         )
 
     print("-" * 80)
-    print(f"Blade 1 Ray Error (3D Misalignment): {ray_error_deg:.2f} deg")
+    print(f"--- Angular Displacement Breakdown (FMU vs OpenFOAM) ---")
+    print(f"Δ Azimuth (YZ plane): {decomposed_errors['azimuth']:>8.2f}°  <-- (Phase/Rotation)")
+    print(f"Δ Tilt    (XZ plane): {decomposed_errors['tilt']:>8.2f}°  <-- (Inclination)")
+    print(f"Δ Yaw     (XY plane): {decomposed_errors['yaw']:>8.2f}°  <-- (Lateral)")
+    print(f"Total 3D Ray Error:   {ray_error_deg:>8.2f}°")
     print("-" * 80, flush=True)
 
 
